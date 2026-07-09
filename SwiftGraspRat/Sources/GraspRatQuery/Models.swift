@@ -32,6 +32,10 @@ struct Entity: Codable, Identifiable {
     let deathDropCoins: Int
     /// "Active" / "Passive"
     let currentJoinMode: String
+    /// 以 Active 模式加入的 tick 列表（可能缺失，如观战快照）
+    let activeJoinTicks: [Int]?
+    /// 以 Passive 模式加入的 tick 列表
+    let passiveJoinTicks: [Int]?
 
     var id: Int { entityId }
 
@@ -41,10 +45,18 @@ struct Entity: Codable, Identifiable {
         case name, x, y, cell
         case deathDropCoins = "death_drop_coins"
         case currentJoinMode = "current_join_mode"
+        case activeJoinTicks = "active_join_ticks"
+        case passiveJoinTicks = "passive_join_ticks"
     }
 
     /// active 状态
     var isActive: Bool { currentJoinMode == "Active" }
+
+    /// 最近一次加入的 tick（active/passive 两个列表里的最大值）。
+    /// tick 越大越新；没有任何加入记录时返回 -1（排序时沉底）。
+    var latestJoinTick: Int {
+        ((activeJoinTicks ?? []) + (passiveJoinTicks ?? [])).max() ?? -1
+    }
 
     /// 坐标文本，如 "(-123600, 557100)"
     var coordinateText: String { "(\(x), \(y))" }

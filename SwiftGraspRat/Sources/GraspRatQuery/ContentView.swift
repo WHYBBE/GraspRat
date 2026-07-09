@@ -33,16 +33,48 @@ struct ContentView: View {
     // MARK: - 主内容
 
     private var scrollContent: some View {
-        ScrollView {
+        VStack(spacing: 12) {
             VStack(spacing: 16) {
                 if let err = store.errorMessage { errorBanner(err) }
                 summaryHeader
                 if let top = store.topDropEntity { TopDropCard(entity: top) }
-                rankingSection
             }
-            .padding()
+            .padding([.horizontal, .top])
             .textSelection(.enabled)   // 允许选中/复制（名字、坐标等）
+
+            columnsSection
         }
+    }
+
+    /// 三列并排：掉落排行（当前列）/ 活人（active）/ 最新加入（join tick 倒序）。
+    /// 每列各自独立滚动，列头常驻。
+    private var columnsSection: some View {
+        HStack(alignment: .top, spacing: 0) {
+            EntityColumn(
+                title: "掉落排行",
+                systemImage: "trophy.fill",
+                tint: .orange,
+                entities: store.entitiesByDrop,
+                detail: .drop
+            )
+            Divider()
+            EntityColumn(
+                title: "活人",
+                systemImage: "bolt.fill",
+                tint: .green,
+                entities: store.activeEntities,
+                detail: .drop
+            )
+            Divider()
+            EntityColumn(
+                title: "最新加入",
+                systemImage: "clock.fill",
+                tint: .blue,
+                entities: store.entitiesByJoinRecency,
+                detail: .joinTick
+            )
+        }
+        .frame(maxWidth: .infinity)
     }
 
     private var summaryHeader: some View {
@@ -53,20 +85,6 @@ struct ContentView: View {
             }
             Text(store.lastUpdated.map { "缓存于 \(Self.timeFormatter.string(from: $0))" } ?? "尚未刷新")
                 .font(.caption).foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var rankingSection: some View {
-        let list = Array(store.entitiesByDrop.prefix(50).enumerated())
-        return VStack(alignment: .leading, spacing: 0) {
-            Text("掉落排行 Top \(list.count)")
-                .font(.headline)
-                .padding(.bottom, 8)
-            ForEach(list, id: \.element.id) { index, entity in
-                EntityRow(rank: index + 1, entity: entity)
-                if index < list.count - 1 { Divider() }
-            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -148,35 +166,108 @@ struct TopDropCard: View {
     }
 }
 
-// MARK: - 排行行
+// MARK: - 实体列（可复用：掉落排行 / 活人 / 最新加入）
+
+/// 行右侧要突出的指标。
+enum RowDetail {
+    case drop       // 掉落金币
+    case joinTick   // 最近一次 join 的 tick（越大越新）
+}
+
+/// 一列：列头 + 独立滚动的实体列表。
+struct EntityColumn: View {
+    let title: String
+    let systemImage: String
+    let tint: Color
+    let entities: [Entity]
+    let detail: RowDetail
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                Label(title, systemImage: systemImage)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(tint)
+                Spacer(minLength: 4)
+                Text("\(entities.count)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+
+            Divider()
+
+            if entities.isEmpty {
+                Text("无")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        let shown = Array(entities.prefix(200).enumerated())
+                        ForEach(shown, id: \.element.id) { index, entity in
+                            EntityRow(rank: index + 1, entity: entity, detail: detail, tint: tint)
+                            if index < shown.count - 1 { Divider() }
+                        }
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+}
+
+// MARK: - 排行行（紧凑，适配窄列）
 
 struct EntityRow: View {
     let rank: Int
     let entity: Entity
+    let detail: RowDetail
+    let tint: Color
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
             Text("\(rank)")
-                .font(.callout.monospacedDigit())
+                .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
-                .frame(width: 28, alignment: .trailing)
+                .frame(width: 22, alignment: .trailing)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(entity.name).font(.body).lineLimit(1)
-                    .textSelection(.enabled)
-                    .contextMenu { Button("复制名字") { Clipboard.copy(entity.name) } }
-                Text("\(entity.coordinateText)  ·  cell \(entity.cellText)")
-                    .font(.caption).foregroundStyle(.secondary)
+                HStack(spacing: 5) {
+                    Text(entity.name).font(.callout).lineLimit(1)
+                        .textSelection(.enabled)
+                        .contextMenu { Button("复制名字") { Clipboard.copy(entity.name) } }
+                    if entity.isActive {
+                        Circle().fill(Color.green).frame(width: 6, height: 6)
+                    }
+                }
+                Text("cell \(entity.cellText)")
+                    .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
             }
 
-            Spacer(minLength: 8)
-            StatusBadge(active: entity.isActive)
-            Text("\(entity.deathDropCoins)")
-                .font(.body.bold().monospacedDigit())
-                .foregroundStyle(.orange)
-                .frame(minWidth: 32, alignment: .trailing)
+            Spacer(minLength: 4)
+            detailValue
         }
+        .padding(.horizontal, 10)
         .padding(.vertical, 6)
+    }
+
+    @ViewBuilder
+    private var detailValue: some View {
+        switch detail {
+        case .drop:
+            Text("\(entity.deathDropCoins)")
+                .font(.callout.bold().monospacedDigit())
+                .foregroundStyle(tint)
+        case .joinTick:
+            VStack(alignment: .trailing, spacing: 1) {
+                Text(entity.latestJoinTick >= 0 ? "t\(entity.latestJoinTick)" : "—")
+                    .font(.caption.monospacedDigit()).foregroundStyle(tint)
+                Text("\(entity.deathDropCoins)")
+                    .font(.caption.bold().monospacedDigit()).foregroundStyle(.orange)
+            }
+        }
     }
 }
 

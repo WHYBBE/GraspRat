@@ -36,7 +36,7 @@ struct GraspRatQueryApp: App {
     var body: some Scene {
         WindowGroup {
             RootView()
-                .frame(minWidth: 380, minHeight: 480)
+                .frame(minWidth: 720, minHeight: 520)
         }
     }
 }

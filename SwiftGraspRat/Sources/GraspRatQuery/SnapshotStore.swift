@@ -38,6 +38,20 @@ final class SnapshotStore: ObservableObject {
         snapshot?.entities.sorted { $0.deathDropCoins > $1.deathDropCoins } ?? []
     }
 
+    /// 活人（current_join_mode == "Active"），按掉落降序
+    var activeEntities: [Entity] {
+        (snapshot?.entities ?? [])
+            .filter { $0.isActive }
+            .sorted { $0.deathDropCoins > $1.deathDropCoins }
+    }
+
+    /// 最新加入的人，按最近加入 tick 倒序（tick 越大越新）。
+    /// 无任何加入记录（latestJoinTick == -1）的实体排在最后。
+    var entitiesByJoinRecency: [Entity] {
+        (snapshot?.entities ?? [])
+            .sorted { $0.latestJoinTick > $1.latestJoinTick }
+    }
+
     /// 概览统计（基于全部实体）
     var summary: SnapshotSummary? {
         snapshot.map { SpatialAggregator.summary($0.entities) }

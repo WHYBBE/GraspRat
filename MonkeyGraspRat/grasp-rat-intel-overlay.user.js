@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Grasp Rat Intel Overlay
 // @namespace    https://grasp-rat-game.h-e.top/
-// @version      0.5.0
-// @description  纯信息层：合并全场小地图数据标记场上玩家，富敌高亮，活跃玩家强化并显示血量，所有原生面板经 CTM 对齐后直接不绘制，不做任何自动操作。
+// @version      0.6.0
+// @description  纯信息层：合并全场实时/快照/小地图数据标记场上玩家，富敌高亮，活人显示名字与血量，原生面板按绘制签名直接不绘制，不做任何自动操作。
 // @match        https://grasp-rat-game.h-e.top/*
 // @run-at       document-end
 // @grant        unsafeWindow
@@ -43,6 +43,10 @@
     // 这游戏血量不回，永久残血几乎人人都是，所以不能用 hp<max 判断，
     // 只能记录 HP 变化：检测到 HP 下降后的这段时间内才给静止僵尸显示血条。
     const RECENT_DAMAGE_MS = 6000;
+    // 实时区半径（cm）：游戏在活跃视野半径内实时流式推送实体（ACTIVE_VIEW_RADIUS_CM=50000）。
+    // 该区内 state.entities 是权威；非实时来源（快照/minimap）的点若落在此区内却不在 entities 里，
+    // 判为已死/离线的陈旧数据并丢弃，避免死人/离线圈滞留到下次快照刷新（最长 60s）。
+    const LIVE_ZONE_CM = 50000;
 
     // 屏幕外玩家改画在屏幕边缘（雷达式），只标注有意义的 Drop，避免边缘被低价值点挤满。
     const EDGE_MIN_DROP = 10;
@@ -70,15 +74,21 @@
     // 文字命中面板矩形时的容差（等宽字体量宽和端上细微差异）。
     const PANEL_HIT_PAD = 4;
 
-    // 金币档位阈值，按 log 递增：10 / 20 / 50 / 100 / 200。
+    // 金币档位阈值，按 log 递增：5 / 10 / 20 / 50 / 100 / 200。
     const DROP_TIERS = [
       { min: 200, radius: 30, color: "232, 121, 249", label: "≥200" }, // 品红
       { min: 100, radius: 25, color: "248, 113, 113", label: "≥100" }, // 红
       { min: 50, radius: 20, color: "251, 146, 60", label: "≥50" },    // 橙
       { min: 20, radius: 14, color: "250, 204, 21", label: "≥20" },    // 黄
       { min: 10, radius: 11, color: "74, 222, 128", label: "≥10" },    // 绿
-      { min: 0, radius: 7, color: "148, 163, 184", label: "<10" }      // 灰
+      { min: 5, radius: 9, color: "45, 212, 191", label: "≥5" },       // 青（>=5 特殊色）
+      { min: 0, radius: 7, color: "148, 163, 184", label: "<5" }       // 灰
     ];
+
+    // 金币数字标注阈值：>=5 起标数字（与 >=5 特殊色一致）。
+    const LABEL_MIN_DROP = 5;
+    // 玩家名字最长显示字符数，超出截断，避免遮挡。
+    const NAME_MAX_CHARS = 14;
 
     if (window[OVERLAY_KEY] && typeof window[OVERLAY_KEY].destroy === "function") {
       window[OVERLAY_KEY].destroy("replaced");
@@ -212,7 +222,7 @@
       legend.innerHTML = DROP_TIERS
         .map(tier => `<div class="intel-legend-row"><span>${tier.label}</span><span class="intel-dot" style="color:rgba(${tier.color},1)"></span></div>`)
         .join("")
-        + '<div class="intel-note">活跃=呼吸强调环 / 静止=稳定环+中心点 / 均显血量 / 边缘=视野外</div>';
+        + '<div class="intel-note">活跃=呼吸环+血量+名字 / 静止=稳定环(挨打才显血) / 边缘=视野外</div>';
 
       const overlay = {
         raf: 0,
@@ -245,16 +255,51 @@
         return Number.isFinite(value) ? value : 0;
       }
 
-      // 合并可见实体和全场 minimap 点，形成“全场玩家”列表。
-      // 实体数据更全（用于活跃判定和精确坐标），minimap 补齐视野外玩家；同用户取更高 Drop。
-      function buildPlayers() {
+      // 存活判定：与游戏 drawEntity 完全一致——dead = life === 'Dead' || hp <= 0。
+      // 注意不能只判 life：死亡实体可能 life 缺失但 hp<=0，之前用 `entity.life && ...`
+      // 前置守卫会短路，导致死人漏过过滤、被当活人画出来还显示名字。
+      function isAliveEntity(entity) {
+        if (!entity) return false;
+        if (entity.life === "Dead") return false;
+        const hp = Number(entity.hp);
+        if (Number.isFinite(hp) && hp <= 0) return false;
+        return true;
+      }
+
+      // 玩家名字：优先实体自带 name，退回游戏 state.userNames，再退回 User+id。
+      function resolvePlayerName(userId, entity) {
+        if (entity && entity.name) return String(entity.name);
+        try {
+          const names = state && state.userNames;
+          if (names && typeof names.get === "function") {
+            const n = names.get(Number(userId));
+            if (n) return String(n);
+          }
+        } catch (_) {}
+        return "";
+      }
+
+      // 合并三路数据形成“全场玩家”列表：
+      //   1) state.entities  实时（WebSocket），死亡/离线立即移除——实时区内的权威来源。
+      //   2) state.farSnapshot.entities  30s 快照，带完整 hp/name，补齐中圈。
+      //   3) state.minimap.points  60s 快照，只有 u/d/x/y，补齐远处视野外。
+      // 反 desync：游戏在活跃视野半径（LIVE_ZONE_CM）内实时推送实体，该区内 state.entities
+      // 就是权威。任何非实时来源（快照/minimap）的点若落在实时区内却不在 entities 里，
+      // 说明已死/离线，直接丢弃，避免死人圈滞留到下次快照（最长 60s）。实时区外才保留。
+      function buildPlayers(view) {
         const meId = currentUserId();
         const byId = new Map();
+        const cx = view ? Number(view.centerX) : NaN;
+        const cy = view ? Number(view.centerY) : NaN;
+        const haveCenter = Number.isFinite(cx) && Number.isFinite(cy);
+        const liveZoneSq = LIVE_ZONE_CM * LIVE_ZONE_CM;
+        const inLiveZone = (x, y) => haveCenter
+          && ((x - cx) * (x - cx) + (y - cy) * (y - cy)) <= liveZoneSq;
 
         for (const entity of state.entities || []) {
           const userId = Number(entity.user_id);
           if (!Number.isFinite(userId) || userId === meId) continue;
-          if (entity.life && entity.life !== "Alive") continue;
+          if (!isAliveEntity(entity)) continue;
           const x = Number(entity.x);
           const y = Number(entity.y);
           if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
@@ -263,7 +308,32 @@
             x,
             y,
             drop: enemyDrop(entity),
+            name: resolvePlayerName(userId, entity),
             source: "entity",
+            entity
+          });
+        }
+
+        // farSnapshot：30s 全场快照，实体结构同 state.entities（含 hp/name/life）。
+        const far = state.farSnapshot && Array.isArray(state.farSnapshot.entities)
+          ? state.farSnapshot.entities : [];
+        for (const entity of far) {
+          const userId = Number(entity && entity.user_id);
+          if (!Number.isFinite(userId) || userId === meId) continue;
+          if (!isAliveEntity(entity)) continue;
+          if (byId.has(userId)) continue; // 已有实时实体，实时优先。
+          const x = Number(entity.x);
+          const y = Number(entity.y);
+          if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+          // 落在实时区内却不在实时 entities 里 → 已死/离线的陈旧快照，丢弃。
+          if (inLiveZone(x, y)) continue;
+          byId.set(userId, {
+            userId,
+            x,
+            y,
+            drop: enemyDrop(entity),
+            name: resolvePlayerName(userId, entity),
+            source: "far",
             entity
           });
         }
@@ -281,7 +351,13 @@
             // 已有实体：保留实时坐标，仅在 minimap Drop 更高时更新。
             if (drop > existing.drop) existing.drop = drop;
           } else {
-            byId.set(userId, { userId, x, y, drop, source: "minimap", entity: null });
+            // 实时区内却没有对应实体 → 已死/离线的陈旧点，丢弃（反 desync 核心）。
+            if (inLiveZone(x, y)) continue;
+            byId.set(userId, {
+              userId, x, y, drop,
+              name: resolvePlayerName(userId, null),
+              source: "minimap", entity: null
+            });
           }
         }
 
@@ -486,7 +562,7 @@
         ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
       }
 
-      function drawMarker(point, tier, active, pulse, drop, now, entity) {
+      function drawMarker(point, tier, active, pulse, drop, now, entity, name) {
         const color = tier.color;
         const baseRadius = tier.radius;
         const emphasis = drop >= EMPHASIS_DROP;
@@ -551,12 +627,33 @@
           }
         }
 
-        // 金币数字：只对有意义的 Drop（>=10）标注，放在血条上方。
-        if (drop >= 10) {
+        // 金币数字：>=5 起标注（与 >=5 特殊色一致），放在血条上方。
+        if (drop >= LABEL_MIN_DROP) {
           drawDropLabel(0, hpBottom - 3, drop, color, active, emphasis);
         }
 
+        // 只有活跃玩家显示名字；静止（僵尸/挂机）不显示，减少画面噪音。
+        if (active && entity && name) {
+          drawNameLabel(0, baseRadius + 4, name, color, active);
+        }
+
         ctx.restore();
+      }
+
+      // 玩家名字标签：画在标记正下方，深色描边保证任何背景下都清晰。
+      function drawNameLabel(x, y, name, color, active) {
+        let text = String(name);
+        if (text.length > NAME_MAX_CHARS) text = text.slice(0, NAME_MAX_CHARS - 1) + "…";
+        ctx.setLineDash([]);
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.font = `${active ? 600 : 500} 12px "Microsoft YaHei", Arial, sans-serif`;
+        ctx.shadowBlur = 0;
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = "rgba(2, 6, 23, .9)";
+        ctx.strokeText(text, x, y);
+        ctx.fillStyle = active ? "rgba(236, 244, 255, .98)" : "rgba(203, 213, 225, .82)";
+        ctx.fillText(text, x, y);
       }
 
       // 活跃玩家血条：画在标记正上方。返回是否真的画了（无 hp 数据则不画）。
@@ -760,8 +857,6 @@
           }
           hookGameCanvas();
           const now = Date.now();
-          const players = buildPlayers();
-          trackMotion(players, now);
           if (document.hidden) {
             overlay.suppressActive = false;
             clearCanvas();
@@ -780,6 +875,10 @@
             overlay.suppressActive = false;
             return;
           }
+
+          // 先算 view，再 buildPlayers——反 desync 的实时区判定要用相机中心。
+          const players = buildPlayers(view);
+          trackMotion(players, now);
 
           const pulse = 0.5 + 0.5 * Math.sin(now / 600);
 
@@ -811,7 +910,7 @@
               && winPoint.x <= surface.width + margin && winPoint.y <= surface.height + margin;
 
             if (visible) {
-              onScreen.push({ point: winPoint, tier, drop, active, entity: player.entity });
+              onScreen.push({ point: winPoint, tier, drop, active, entity: player.entity, name: player.name });
             } else if (drop >= EDGE_MIN_DROP) {
               offScreen.push({ point: winPoint, tier, drop, active });
             }
@@ -829,7 +928,7 @@
           // 视野内：先画挂机（虚化底层），再画活跃（强调压顶）。
           onScreen.sort((a, b) => Number(a.active) - Number(b.active));
           for (const marker of onScreen) {
-            drawMarker(marker.point, marker.tier, marker.active, pulse, marker.drop, now, marker.entity);
+            drawMarker(marker.point, marker.tier, marker.active, pulse, marker.drop, now, marker.entity, marker.name);
           }
         } catch (_) {
           overlay.suppressActive = false;
