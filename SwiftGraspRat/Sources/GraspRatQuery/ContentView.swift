@@ -133,6 +133,9 @@ struct TopDropCard: View {
                     .font(.headline)
                     .foregroundStyle(.orange)
                 Spacer()
+                if entity.isWithin100k {
+                    NearOriginBadge()
+                }
                 StatusBadge(active: entity.isActive)
             }
 
@@ -156,7 +159,14 @@ struct TopDropCard: View {
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(.orange.opacity(0.3)))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(
+                    entity.isWithin100k
+                        ? Color.nearOrigin.opacity(0.45)
+                        : Color.orange.opacity(0.3)
+                )
+        )
     }
 
     private func stat(_ title: String, _ value: String) -> some View {
@@ -243,9 +253,19 @@ struct EntityRow: View {
                     if entity.isActive {
                         Circle().fill(Color.green).frame(width: 6, height: 6)
                     }
+                    if entity.isWithin100k {
+                        Text("10万内")
+                            .font(.system(size: 9, weight: .semibold))
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Color.nearOrigin.opacity(0.18), in: Capsule())
+                            .foregroundStyle(Color.nearOrigin)
+                    }
                 }
                 Text("cell \(entity.cellText)")
-                    .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                    .font(.caption2)
+                    .foregroundStyle(entity.isWithin100k ? Color.nearOrigin.opacity(0.85) : Color.secondary)
+                    .lineLimit(1)
             }
 
             Spacer(minLength: 4)
@@ -253,6 +273,7 @@ struct EntityRow: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
+        .background(entity.isWithin100k ? Color.nearOrigin.opacity(0.08) : Color.clear)
     }
 
     @ViewBuilder
@@ -302,6 +323,23 @@ struct StatusBadge: View {
             .background((active ? Color.green : Color.gray).opacity(0.18), in: Capsule())
             .foregroundStyle(active ? Color.green : Color.gray)
     }
+}
+
+/// 原点 10 万坐标范围内的高亮标记（青灰，略明显但不刺眼）
+struct NearOriginBadge: View {
+    var body: some View {
+        Text("10万内")
+            .font(.caption.weight(.semibold))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(Color.nearOrigin.opacity(0.18), in: Capsule())
+            .foregroundStyle(Color.nearOrigin)
+    }
+}
+
+private extension Color {
+    /// 青灰，用于“10万内”高亮（比 secondary 更醒目，比 purple 柔和）
+    static let nearOrigin = Color(red: 0.28, green: 0.45, blue: 0.58)
 }
 
 #Preview {

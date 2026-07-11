@@ -73,6 +73,11 @@ struct Entity: Codable, Identifiable {
     /// active 状态
     var isActive: Bool { currentJoinMode == "Active" }
 
+    /// 坐标在原点 10 万以内（|x|、|y| 均 < 100_000）
+    var isWithin100k: Bool {
+        abs(x) < 100_000 && abs(y) < 100_000
+    }
+
     /// 血量文本，如 "100/100"
     var hpText: String { "\(hp)/\(maxHp)" }
 
