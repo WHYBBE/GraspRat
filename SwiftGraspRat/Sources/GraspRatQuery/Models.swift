@@ -98,6 +98,12 @@ struct Entity: Codable, Identifiable {
 
     /// 网格坐标文本，如 "(-124, 557)"
     var cellText: String { cell.count == 2 ? "(\(cell[0]), \(cell[1]))" : "—" }
+
+    /// 到另一实体的欧氏距离（坐标单位）
+    func distance(to other: Entity) -> Double {
+        let dx = Double(x - other.x), dy = Double(y - other.y)
+        return (dx * dx + dy * dy).squareRoot()
+    }
 }
 
 // MARK: - 聚合统计

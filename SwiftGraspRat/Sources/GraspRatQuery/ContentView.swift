@@ -337,7 +337,7 @@ struct NearOriginBadge: View {
     }
 }
 
-private extension Color {
+extension Color {
     /// 青灰，用于“10万内”高亮（比 secondary 更醒目，比 purple 柔和）
     static let nearOrigin = Color(red: 0.28, green: 0.45, blue: 0.58)
 }
