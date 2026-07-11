@@ -28,6 +28,10 @@ struct Entity: Codable, Identifiable {
     let x: Int
     let y: Int
     let cell: [Int]
+    /// 当前血量（旧缓存可能缺失，缺省 0）
+    let hp: Int
+    /// 最大血量（旧缓存可能缺失，缺省 0）
+    let maxHp: Int
     /// 死亡掉落金币 —— 即“drop”
     let deathDropCoins: Int
     /// "Active" / "Passive"
@@ -42,15 +46,41 @@ struct Entity: Codable, Identifiable {
     enum CodingKeys: String, CodingKey {
         case entityId = "entity_id"
         case userId = "user_id"
-        case name, x, y, cell
+        case name, x, y, cell, hp
+        case maxHp = "max_hp"
         case deathDropCoins = "death_drop_coins"
         case currentJoinMode = "current_join_mode"
         case activeJoinTicks = "active_join_ticks"
         case passiveJoinTicks = "passive_join_ticks"
     }
 
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        entityId = try c.decode(Int.self, forKey: .entityId)
+        userId = try c.decode(Int.self, forKey: .userId)
+        name = try c.decode(String.self, forKey: .name)
+        x = try c.decode(Int.self, forKey: .x)
+        y = try c.decode(Int.self, forKey: .y)
+        cell = try c.decode([Int].self, forKey: .cell)
+        hp = try c.decodeIfPresent(Int.self, forKey: .hp) ?? 0
+        maxHp = try c.decodeIfPresent(Int.self, forKey: .maxHp) ?? 0
+        deathDropCoins = try c.decode(Int.self, forKey: .deathDropCoins)
+        currentJoinMode = try c.decode(String.self, forKey: .currentJoinMode)
+        activeJoinTicks = try c.decodeIfPresent([Int].self, forKey: .activeJoinTicks)
+        passiveJoinTicks = try c.decodeIfPresent([Int].self, forKey: .passiveJoinTicks)
+    }
+
     /// active 状态
     var isActive: Bool { currentJoinMode == "Active" }
+
+    /// 血量文本，如 "100/100"
+    var hpText: String { "\(hp)/\(maxHp)" }
+
+    /// 血量比例 0...1（maxHp 无效时为 0）
+    var hpRatio: Double {
+        guard maxHp > 0 else { return 0 }
+        return min(1, max(0, Double(hp) / Double(maxHp)))
+    }
 
     /// 最近一次加入的 tick（active/passive 两个列表里的最大值）。
     /// tick 越大越新；没有任何加入记录时返回 -1（排序时沉底）。

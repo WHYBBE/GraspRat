@@ -46,7 +46,7 @@ struct ContentView: View {
         }
     }
 
-    /// 三列并排：掉落排行（当前列）/ 活人（active）/ 最新加入（join tick 倒序）。
+    /// 三列并排：掉落排行（当前列）/ 活人（active，含血量）/ 最新加入（join tick 倒序）。
     /// 每列各自独立滚动，列头常驻。
     private var columnsSection: some View {
         HStack(alignment: .top, spacing: 0) {
@@ -63,7 +63,7 @@ struct ContentView: View {
                 systemImage: "bolt.fill",
                 tint: .green,
                 entities: store.activeEntities,
-                detail: .drop
+                detail: .hp
             )
             Divider()
             EntityColumn(
@@ -144,6 +144,7 @@ struct TopDropCard: View {
 
             HStack(alignment: .top, spacing: 24) {
                 stat("掉落", "\(entity.deathDropCoins)")
+                stat("血量", entity.hpText)
                 stat("坐标 (x, y)", entity.coordinateText)
                 stat("Cell", entity.cellText)
             }
@@ -171,6 +172,7 @@ struct TopDropCard: View {
 /// 行右侧要突出的指标。
 enum RowDetail {
     case drop       // 掉落金币
+    case hp         // 血量 hp/max_hp（活人列）
     case joinTick   // 最近一次 join 的 tick（越大越新）
 }
 
@@ -260,6 +262,14 @@ struct EntityRow: View {
             Text("\(entity.deathDropCoins)")
                 .font(.callout.bold().monospacedDigit())
                 .foregroundStyle(tint)
+        case .hp:
+            VStack(alignment: .trailing, spacing: 1) {
+                Text(entity.hpText)
+                    .font(.callout.bold().monospacedDigit())
+                    .foregroundStyle(hpColor)
+                Text("\(entity.deathDropCoins)")
+                    .font(.caption.bold().monospacedDigit()).foregroundStyle(.orange)
+            }
         case .joinTick:
             VStack(alignment: .trailing, spacing: 1) {
                 Text(entity.latestJoinTick >= 0 ? "t\(entity.latestJoinTick)" : "—")
@@ -268,6 +278,14 @@ struct EntityRow: View {
                     .font(.caption.bold().monospacedDigit()).foregroundStyle(.orange)
             }
         }
+    }
+
+    /// 绿 → 黄 → 红，随血量比例变化
+    private var hpColor: Color {
+        let r = entity.hpRatio
+        if r > 0.5 { return .green }
+        if r > 0.25 { return .yellow }
+        return .red
     }
 }
 
