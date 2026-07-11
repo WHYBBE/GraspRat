@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grasp Rat Intel Overlay
 // @namespace    https://grasp-rat-game.h-e.top/
-// @version      0.7.2
+// @version      0.7.3
 // @description  纯信息层：合并全场实时/快照/小地图数据标记场上玩家，富敌高亮，Active=实线+名+残血HP，Passive=虚线(drop≥20标名)，原生面板按绘制签名直接不绘制，不做任何自动操作。
 // @match        https://grasp-rat-game.h-e.top/*
 // @run-at       document-end
@@ -255,7 +255,7 @@
       legend.innerHTML = DROP_TIERS
         .map(tier => `<div class="intel-legend-row"><span>${tier.label}</span><span class="intel-dot" style="color:rgba(${tier.color},1)"></span></div>`)
         .join("")
-        + '<div class="intel-note">Active=实线+名 · 残血显HP · Passive=虚线(drop≥20标名) · 边=外</div>';
+        + '<div class="intel-note">Active=实线+名 · 残血显HP · Passive=虚线+被打显HP(drop≥20标名) · 边=外</div>';
 
       const overlay = {
         raf: 0,
@@ -308,9 +308,9 @@
         return !!(entity && entity.current_join_mode === "Active");
       }
 
-      // 仅 Active 且 hp 有值且 ≠100 画血条。
+      // 有 hp 且 ≠100 就画血条（Active 残血 / Passive 被打后都显示）。
       function shouldShowHp(entity) {
-        if (!isActiveJoin(entity)) return false;
+        if (!entity) return false;
         const hp = Number(entity.hp);
         if (!Number.isFinite(hp)) return false;
         return hp !== 100;
@@ -842,9 +842,9 @@
           drawCtx.fill();
         }
 
-        // 血量：仅 Active 且 hp≠100。
+        // 血量：hp≠100 时显示（含 Passive 被打残血）。
         let hpBottom = -baseRadius - 2 - labelLift;
-        if (isAlive && entity && shouldShowHp(entity)) {
+        if (entity && shouldShowHp(entity)) {
           const drawn = drawHpBar(0, -baseRadius - 2 - labelLift, entity);
           if (drawn) hpBottom = -baseRadius - 2 - labelLift - HP_BAR_H - HP_BAR_GAP;
         }
@@ -1194,7 +1194,7 @@
         assignLabelStacks(onScreen.filter(m => {
           if (m.showDropLabel) return true;
           if (m.alive && m.name) return true;
-          if (m.alive && m.entity && shouldShowHp(m.entity)) return true;
+          if (m.entity && shouldShowHp(m.entity)) return true;
           if (!m.alive && m.name && m.drop >= DEAD_NAME_MIN_DROP) return true;
           return false;
         }));
