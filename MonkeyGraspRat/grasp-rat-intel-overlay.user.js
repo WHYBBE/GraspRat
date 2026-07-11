@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Grasp Rat Intel Overlay
 // @namespace    https://grasp-rat-game.h-e.top/
-// @version      0.6.9
-// @description  纯信息层：合并全场实时/快照/小地图数据标记场上玩家，富敌高亮，活人显示名字与血量，原生面板按绘制签名直接不绘制，不做任何自动操作。
+// @version      0.7.2
+// @description  纯信息层：合并全场实时/快照/小地图数据标记场上玩家，富敌高亮，Active=实线+名+残血HP，Passive=虚线(drop≥20标名)，原生面板按绘制签名直接不绘制，不做任何自动操作。
 // @match        https://grasp-rat-game.h-e.top/*
 // @run-at       document-end
 // @grant        unsafeWindow
@@ -93,6 +93,8 @@
 
     // 金币数字标注阈值：>=5 起标数字（与 >=5 特殊色一致）。
     const LABEL_MIN_DROP = 5;
+    // Passive 仅 drop≥此值才显示名字（低价值 Passive 不刷名）。
+    const DEAD_NAME_MIN_DROP = 20;
     // 玩家名字最长显示字符数，超出截断，避免遮挡。
     const NAME_MAX_CHARS = 14;
 
@@ -253,7 +255,7 @@
       legend.innerHTML = DROP_TIERS
         .map(tier => `<div class="intel-legend-row"><span>${tier.label}</span><span class="intel-dot" style="color:rgba(${tier.color},1)"></span></div>`)
         .join("")
-        + '<div class="intel-note">活跃=环+血+名 · 静=点 · 边=外</div>';
+        + '<div class="intel-note">Active=实线+名 · 残血显HP · Passive=虚线(drop≥20标名) · 边=外</div>';
 
       const overlay = {
         raf: 0,
@@ -300,6 +302,20 @@
         return true;
       }
 
+      // 「活人/Active」= current_join_mode === "Active"（与游戏/Swift 一致）。
+      // Passive = 虚线圈；真死 life/hp 不画。
+      function isActiveJoin(entity) {
+        return !!(entity && entity.current_join_mode === "Active");
+      }
+
+      // 仅 Active 且 hp 有值且 ≠100 画血条。
+      function shouldShowHp(entity) {
+        if (!isActiveJoin(entity)) return false;
+        const hp = Number(entity.hp);
+        if (!Number.isFinite(hp)) return false;
+        return hp !== 100;
+      }
+
       // 玩家名字：优先实体自带 name，退回游戏 state.userNames，再退回 User+id。
       function resolvePlayerName(userId, entity) {
         if (entity && entity.name) return String(entity.name);
@@ -330,10 +346,11 @@
         const inLiveZone = (x, y) => haveCenter
           && ((x - cx) * (x - cx) + (y - cy) * (y - cy)) <= liveZoneSq;
 
-        // 1) 游戏 getRenderEntities：与圆点/原生标签同一插值坐标（防缩放乱飞）。
+        // 1) getRenderEntities：alive = Active join；Passive 画虚线。
         for (const entity of gameRenderEntities()) {
           const userId = Number(entity && entity.user_id);
           if (!Number.isFinite(userId) || userId === meId) continue;
+          // 真死不画；Passive 仍画（虚线）
           if (!isAliveEntity(entity)) continue;
           const x = Number(entity.x);
           const y = Number(entity.y);
@@ -343,6 +360,7 @@
             drop: enemyDrop(entity),
             name: resolvePlayerName(userId, entity),
             source: entity.farSnapshot ? "far-render" : "render",
+            alive: isActiveJoin(entity),
             entity
           });
         }
@@ -361,6 +379,7 @@
             drop: enemyDrop(entity),
             name: resolvePlayerName(userId, entity),
             source: "entity",
+            alive: isActiveJoin(entity),
             entity
           });
         }
@@ -382,6 +401,7 @@
             drop: enemyDrop(entity),
             name: resolvePlayerName(userId, entity),
             source: "far",
+            alive: isActiveJoin(entity),
             entity
           });
         }
@@ -403,7 +423,9 @@
             byId.set(userId, {
               userId, x, y, drop,
               name: resolvePlayerName(userId, null),
-              source: "minimap", entity: null
+              source: "minimap",
+              alive: false, // minimap 无 join_mode，按 Passive 虚线圈
+              entity: null
             });
           }
         }
@@ -750,19 +772,36 @@
         for (let i = 0; i < markers.length; i++) markers[i].labelStack = stacks[i];
       }
 
-      function drawMarker(point, tier, active, pulse, drop, now, entity, name, labelStack, showDropLabel, markerScale) {
+      function drawMarker(point, tier, active, pulse, drop, now, entity, name, labelStack, showDropLabel, markerScale, alive) {
         const color = tier.color;
         const ms = Number.isFinite(markerScale) ? markerScale : 1;
         const baseRadius = Math.max(4, tier.radius * ms);
-        const emphasis = drop >= EMPHASIS_DROP;
+        const emphasis = drop >= EMPHASIS_DROP && alive;
         const stack = labelStack || 0;
         const labelLift = stack * LABEL_STACK_STEP;
+        const isAlive = alive !== false;
 
         drawCtx.save();
         drawCtx.translate(point.x, point.y);
 
-        if (active) {
-          // 活跃玩家一律强化：全都画向外扩散的呼吸环（富敌再加一圈更大更亮的）。
+        if (!isAlive) {
+          // Passive：虚线圈 + 淡填充，与 Active 实线圈区分。
+          drawCtx.beginPath();
+          drawCtx.arc(0, 0, baseRadius, 0, Math.PI * 2);
+          drawCtx.fillStyle = `rgba(${color}, .06)`;
+          drawCtx.fill();
+          drawCtx.lineWidth = 2;
+          drawCtx.setLineDash([4, 3]);
+          drawCtx.strokeStyle = `rgba(${color}, .55)`;
+          drawCtx.shadowBlur = 0;
+          drawCtx.stroke();
+          drawCtx.setLineDash([]);
+          drawCtx.beginPath();
+          drawCtx.arc(0, 0, Math.max(1.2, baseRadius * 0.22), 0, Math.PI * 2);
+          drawCtx.fillStyle = `rgba(${color}, .45)`;
+          drawCtx.fill();
+        } else if (active) {
+          // Active 且在动：呼吸环 + 实心圈。
           const expand = (now % 1600) / 1600;
           drawCtx.beginPath();
           drawCtx.arc(0, 0, baseRadius + 4 + expand * (emphasis ? 22 : 14), 0, Math.PI * 2);
@@ -772,7 +811,6 @@
           drawCtx.shadowBlur = 0;
           drawCtx.stroke();
 
-          // 活跃：实心圈 + 呼吸光晕。全体活跃都比原来更亮，富敌更甚。
           const glow = (emphasis ? 14 : 10) + pulse * (emphasis ? 16 : 12);
           const ringAlpha = 0.9 + pulse * 0.1;
 
@@ -788,8 +826,7 @@
           drawCtx.shadowColor = `rgba(${color}, .9)`;
           drawCtx.stroke();
         } else {
-          // 静止（挂机）：不再虚化消失，改用清晰但“稳定”的状态标识——
-          // 实心稳定环（不呼吸）+ 中心点，与活跃的呼吸/扩散区分，一眼能认出“在场但没动”。
+          // Active 静止：实心稳定环（非虚线）+ 中心点。
           drawCtx.beginPath();
           drawCtx.arc(0, 0, baseRadius, 0, Math.PI * 2);
           drawCtx.fillStyle = `rgba(${color}, .1)`;
@@ -799,35 +836,31 @@
           drawCtx.strokeStyle = `rgba(${color}, .78)`;
           drawCtx.shadowBlur = 0;
           drawCtx.stroke();
-          // 中心实心点：静止标识。
           drawCtx.beginPath();
           drawCtx.arc(0, 0, Math.max(1.6, baseRadius * 0.28), 0, Math.PI * 2);
           drawCtx.fillStyle = `rgba(${color}, .9)`;
           drawCtx.fill();
         }
 
-        // 血条（原生面板已被隐藏，血量得由我们补回来）。仅可见实体有 hp 数据。
-        // 活跃玩家一直显示血量；静止（僵尸）只有“最近刚掉血”才显示——
-        // 因为血量不回，用 hp<max 判断会让所有被打过的僵尸永久挂血条。
-        // 标签紧贴圆环上方；labelLift 最多 1 档，防止数字飞离本体。
+        // 血量：仅 Active 且 hp≠100。
         let hpBottom = -baseRadius - 2 - labelLift;
-        if (entity) {
-          const damagedRecently = recentlyDamaged(entity.user_id, now);
-          if (active || damagedRecently) {
-            const drawn = drawHpBar(0, -baseRadius - 2 - labelLift, entity);
-            if (drawn) hpBottom = -baseRadius - 2 - labelLift - HP_BAR_H - HP_BAR_GAP;
-          }
+        if (isAlive && entity && shouldShowHp(entity)) {
+          const drawn = drawHpBar(0, -baseRadius - 2 - labelLift, entity);
+          if (drawn) hpBottom = -baseRadius - 2 - labelLift - HP_BAR_H - HP_BAR_GAP;
         }
 
         // 金币数字：贴在环上，由 LOD + 屏幕去重决定是否画。
         if (showDropLabel && drop >= LABEL_MIN_DROP) {
-          drawDropLabel(0, hpBottom - 1, drop, color, active, emphasis);
+          drawDropLabel(0, hpBottom - 1, drop, color, active && isAlive, emphasis);
         }
 
-        // 只有活跃玩家显示名字；静止（僵尸/挂机）不显示，减少画面噪音。
-        // 近距时向下错开，避免多人名字叠成一团。
-        if (active && entity && name) {
-          drawNameLabel(0, baseRadius + 4 + labelLift, name, color, active);
+        // Active 始终显示名字；Passive 仅 drop≥20 才标名。
+        if (name) {
+          if (isAlive) {
+            drawNameLabel(0, baseRadius + 4 + labelLift, name, color, active);
+          } else if (drop >= DEAD_NAME_MIN_DROP) {
+            drawNameLabel(0, baseRadius + 4 + labelLift, name, color, false);
+          }
         }
 
         drawCtx.restore();
@@ -835,7 +868,7 @@
 
       // 玩家名字标签：画在标记正下方，深色描边保证任何背景下都清晰。
       function drawNameLabel(x, y, name, color, active) {
-        let text = String(name);
+        let text = String(name).replace(/\s*DEAD$/i, "").trim();
         if (text.length > NAME_MAX_CHARS) text = text.slice(0, NAME_MAX_CHARS - 1) + "…";
         drawCtx.setLineDash([]);
         drawCtx.textAlign = "center";
@@ -1135,18 +1168,19 @@
           const point = { x: localX, y: localY };
           const drop = player.drop;
           const tier = dropTier(drop);
-          const active = movedRecently(player.userId, now);
+          const alive = player.alive !== false;
+          const active = alive && movedRecently(player.userId, now);
           const margin = tier.radius * policy.markerScale + 24;
           const visible = point.x >= -margin && point.y >= -margin
             && point.x <= surface.width + margin && point.y <= surface.height + margin;
           if (visible) {
             onScreen.push({
-              point, tier, drop, active,
+              point, tier, drop, active, alive,
               entity: player.entity, name: player.name,
               labelStack: 0, showDropLabel: false
             });
           } else if (drop >= policy.edgeMin) {
-            offScreen.push({ point, tier, drop, active });
+            offScreen.push({ point, tier, drop, active, alive });
           }
         }
 
@@ -1156,13 +1190,24 @@
           drawEdgeMarker(marker.point, marker.tier, marker.drop, marker.active, pulse, surface, now);
         }
         selectLabeled(onScreen, policy);
-        assignLabelStacks(onScreen.filter(m => m.showDropLabel || m.active));
-        onScreen.sort((a, b) => Number(a.active) - Number(b.active));
+        // 名字/残血也参与错开（Active 始终有名）
+        assignLabelStacks(onScreen.filter(m => {
+          if (m.showDropLabel) return true;
+          if (m.alive && m.name) return true;
+          if (m.alive && m.entity && shouldShowHp(m.entity)) return true;
+          if (!m.alive && m.name && m.drop >= DEAD_NAME_MIN_DROP) return true;
+          return false;
+        }));
+        // Passive 先画，Active 压顶；同组内静止先于运动
+        onScreen.sort((a, b) => {
+          if (a.alive !== b.alive) return Number(a.alive) - Number(b.alive);
+          return Number(a.active) - Number(b.active);
+        });
         for (const marker of onScreen) {
           drawMarker(
             marker.point, marker.tier, marker.active, pulse, marker.drop,
             now, marker.entity, marker.name, marker.labelStack,
-            marker.showDropLabel, policy.markerScale
+            marker.showDropLabel, policy.markerScale, marker.alive
           );
         }
       }
