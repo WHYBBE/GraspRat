@@ -10,7 +10,7 @@ struct RootView: View {
             ContentView()
                 .tabItem { Label("最大掉落", systemImage: "trophy") }
             StatsView()
-                .tabItem { Label("聚合统计", systemImage: "square.grid.3x3") }
+                .tabItem { Label("邻近聚合", systemImage: "circle.grid.cross") }
         }
         .environmentObject(store)
     }

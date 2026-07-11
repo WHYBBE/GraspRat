@@ -1,13 +1,13 @@
 import SwiftUI
 
-/// 按网格对实体坐标做空间聚合统计。
-/// 网格边长可选；1000 = 游戏原生 cell（即“1000 xy 坐标内”），调大可看到聚集热点。
+/// 按距离对实体做邻近聚类：距离 ≤ 半径的人连成一团（传递性），只展示 ≥2 人的聚集。
 struct StatsView: View {
     @EnvironmentObject private var store: SnapshotStore
 
-    private let gridOptions = [1000, 10000, 50000, 100000]
-    @State private var gridSize = 1000
-    @State private var sort: BucketSort = .count
+    /// 邻近半径（坐标单位，约等于游戏内米）。默认 1000。
+    private let radiusOptions = [500, 1000, 5000, 10000]
+    @State private var radius = 1000
+    @State private var sort: ClusterSort = .drop
 
     var body: some View {
         NavigationStack {
@@ -20,7 +20,7 @@ struct StatsView: View {
                     emptyState
                 }
             }
-            .navigationTitle("聚合统计")
+            .navigationTitle("邻近聚合")
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     Button(action: { Task { await store.refresh() } }) {
@@ -33,62 +33,74 @@ struct StatsView: View {
         }
     }
 
-    private var sortedBuckets: [GridBucket] {
-        let b = store.buckets(gridSize: gridSize)
+    private var sortedClusters: [ProximityCluster] {
+        let c = store.clusters(radius: radius)
         switch sort {
-        case .count: return b.sorted { ($0.count, $0.totalDrop) > ($1.count, $1.totalDrop) }
-        case .drop:  return b.sorted { ($0.totalDrop, $0.count) > ($1.totalDrop, $1.count) }
+        case .count: return c.sorted { ($0.count, $0.totalDrop) > ($1.count, $1.totalDrop) }
+        case .drop:  return c.sorted { ($0.totalDrop, $0.count) > ($1.totalDrop, $1.count) }
         }
     }
 
     private var content: some View {
-        let buckets = sortedBuckets
-        let shown = Array(buckets.prefix(50).enumerated())
-        let maxCount = buckets.map(\.count).max() ?? 1
+        let clusters = sortedClusters
+        let shown = Array(clusters.prefix(50).enumerated())
+        let maxCount = clusters.map(\.count).max() ?? 1
+        let clusteredPeople = clusters.reduce(0) { $0 + $1.count }
         return ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 if let err = store.errorMessage { errorBanner(err) }
-                gridPicker
+                radiusPicker
                 if let s = store.summary {
-                    SummaryCard(summary: s, bucketCount: buckets.count, gridSize: gridSize)
+                    SummaryCard(
+                        summary: s,
+                        clusterCount: clusters.count,
+                        clusteredPeople: clusteredPeople,
+                        radius: radius
+                    )
                 }
                 sortPicker
-                Text("热点网格 Top \(shown.count)").font(.headline)
+                Text(clusters.isEmpty
+                     ? "暂无 ≥2 人聚集"
+                     : "邻近团 Top \(shown.count)")
+                    .font(.headline)
                 VStack(spacing: 0) {
-                    ForEach(shown, id: \.element.id) { index, bucket in
-                        BucketRow(rank: index + 1, bucket: bucket, maxCount: maxCount)
+                    ForEach(shown, id: \.element.id) { index, cluster in
+                        ClusterRow(rank: index + 1, cluster: cluster, maxCount: maxCount)
                         if index < shown.count - 1 { Divider() }
                     }
                 }
             }
             .padding()
-            .textSelection(.enabled)   // 坐标、范围等可选中复制
+            .textSelection(.enabled)
         }
     }
 
-    private var gridPicker: some View {
+    private var radiusPicker: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Picker("网格边长", selection: $gridSize) {
-                ForEach(gridOptions, id: \.self) { Text(gridLabel($0)).tag($0) }
+            Picker("邻近半径", selection: $radius) {
+                ForEach(radiusOptions, id: \.self) { Text(radiusLabel($0)).tag($0) }
             }
             .pickerStyle(.segmented)
-            Text("网格边长（坐标单位）。1000 = 游戏原生 cell；调大可看到聚集热点。")
+            Text("距离 ≤ 半径连成一团（可传递）；排除原点 10 万内实体；只显示 ≥2 人的团。")
                 .font(.caption2).foregroundStyle(.secondary)
         }
     }
 
     private var sortPicker: some View {
         Picker("排序", selection: $sort) {
-            ForEach(BucketSort.allCases) { Text($0.rawValue).tag($0) }
+            ForEach(ClusterSort.allCases) { Text($0.rawValue).tag($0) }
         }
         .pickerStyle(.segmented)
     }
 
-    private func gridLabel(_ g: Int) -> String { g >= 1000 ? "\(g / 1000)k" : "\(g)" }
+    private func radiusLabel(_ r: Int) -> String {
+        if r >= 1000 { return "\(r / 1000)k" }
+        return "\(r)"
+    }
 
     private var emptyState: some View {
         VStack(spacing: 16) {
-            Image(systemName: "square.grid.3x3")
+            Image(systemName: "circle.grid.cross")
                 .font(.system(size: 48)).foregroundStyle(.secondary)
             Text("暂无缓存数据").font(.headline)
             Text("点击下方按钮获取最新快照")
@@ -109,8 +121,8 @@ struct StatsView: View {
     }
 }
 
-enum BucketSort: String, CaseIterable, Identifiable {
-    case count = "按数量"
+enum ClusterSort: String, CaseIterable, Identifiable {
+    case count = "按人数"
     case drop = "按掉落"
     var id: String { rawValue }
 }
@@ -119,8 +131,9 @@ enum BucketSort: String, CaseIterable, Identifiable {
 
 struct SummaryCard: View {
     let summary: SnapshotSummary
-    let bucketCount: Int
-    let gridSize: Int
+    let clusterCount: Int
+    let clusteredPeople: Int
+    let radius: Int
 
     private let columns = [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())]
 
@@ -136,7 +149,7 @@ struct SummaryCard: View {
                 stat("最大掉落", "\(summary.maxDrop)")
             }
             Divider()
-            Text("占用网格：\(bucketCount)（边长 \(gridSize)）")
+            Text("邻近团：\(clusterCount)（半径 \(radius)，已排除 10 万内）· 入团 \(clusteredPeople) 人")
                 .font(.caption).foregroundStyle(.secondary)
             Text("x ∈ [\(summary.minX), \(summary.maxX)]   y ∈ [\(summary.minY), \(summary.maxY)]")
                 .font(.caption).foregroundStyle(.secondary)
@@ -155,11 +168,11 @@ struct SummaryCard: View {
     }
 }
 
-// MARK: - 网格行（含密度条）
+// MARK: - 邻近团行
 
-struct BucketRow: View {
+struct ClusterRow: View {
     let rank: Int
-    let bucket: GridBucket
+    let cluster: ProximityCluster
     let maxCount: Int
 
     var body: some View {
@@ -170,27 +183,37 @@ struct BucketRow: View {
 
             VStack(alignment: .leading, spacing: 5) {
                 HStack {
-                    Text("网格 \(bucket.cellText)").font(.subheadline.weight(.semibold))
+                    Text("中心 \(cluster.centerText)")
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
                     Spacer()
-                    Text("\(bucket.count) 个").font(.subheadline.monospacedDigit())
+                    Text("\(cluster.count) 人")
+                        .font(.subheadline.monospacedDigit())
                 }
                 GeometryReader { geo in
                     ZStack(alignment: .leading) {
                         Capsule().fill(Color.orange.opacity(0.15))
                         Capsule().fill(Color.orange.opacity(0.75))
-                            .frame(width: max(2, geo.size.width * CGFloat(bucket.count) / CGFloat(max(maxCount, 1))))
+                            .frame(width: max(2, geo.size.width * CGFloat(cluster.count) / CGFloat(max(maxCount, 1))))
                     }
                 }
                 .frame(height: 6)
                 HStack(spacing: 14) {
-                    Label("\(bucket.activeCount)", systemImage: "bolt.fill").foregroundStyle(.green)
-                    Label("\(bucket.totalDrop)", systemImage: "bitcoinsign.circle").foregroundStyle(.orange)
-                    Text("max \(bucket.maxDrop)").foregroundStyle(.secondary)
+                    Label("\(cluster.activeCount)", systemImage: "bolt.fill").foregroundStyle(.green)
+                    Label("\(cluster.totalDrop)", systemImage: "bitcoinsign.circle").foregroundStyle(.orange)
+                    Text("max \(cluster.maxDrop)").foregroundStyle(.secondary)
                     Spacer()
-                    Text(bucket.rangeText).foregroundStyle(.secondary)
-                        .lineLimit(1).truncationMode(.middle)
                 }
                 .font(.caption.monospacedDigit())
+                Text(cluster.topNames.joined(separator: " · "))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                Text(cluster.spanText)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
         }
         .padding(.vertical, 7)

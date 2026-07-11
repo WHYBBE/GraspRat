@@ -102,23 +102,25 @@ struct Entity: Codable, Identifiable {
 
 // MARK: - 聚合统计
 
-/// 一个 gridSize×gridSize 网格的聚合结果
-struct GridBucket: Identifiable {
-    let gx: Int                 // floor(x / gridSize)
-    let gy: Int                 // floor(y / gridSize)
-    let gridSize: Int
-    let count: Int              // 落在该网格的实体数
+/// 邻近聚类结果：距离 ≤ radius 的实体通过传递性连成一团。
+struct ProximityCluster: Identifiable {
+    let id: Int
+    let radius: Int
+    let count: Int
     let activeCount: Int
-    let totalDrop: Int          // 掉落合计
-    let maxDrop: Int            // 单体最大掉落
+    let totalDrop: Int
+    let maxDrop: Int
+    /// 质心（成员坐标均值）
+    let centerX: Int
+    let centerY: Int
+    let minX: Int, maxX: Int, minY: Int, maxY: Int
+    /// 按 drop 降序的名字（最多 6 个，用于列表预览）
+    let topNames: [String]
 
-    var id: String { "\(gx),\(gy)" }
     var passiveCount: Int { count - activeCount }
-    var cellText: String { "(\(gx), \(gy))" }
-
-    /// 网格覆盖的坐标范围，如 "x[0, 1000)  y[0, 1000)"
-    var rangeText: String {
-        "x[\(gx * gridSize), \(gx * gridSize + gridSize))  y[\(gy * gridSize), \(gy * gridSize + gridSize))"
+    var centerText: String { "(\(centerX), \(centerY))" }
+    var spanText: String {
+        "x[\(minX), \(maxX)]  y[\(minY), \(maxY)]"
     }
 }
 
@@ -142,25 +144,115 @@ enum SpatialAggregator {
         return (r != 0 && (r < 0) != (b < 0)) ? q - 1 : q
     }
 
-    /// 把实体按 gridSize×gridSize 网格聚合（仅返回非空网格，未排序）
-    static func buckets(_ entities: [Entity], gridSize: Int) -> [GridBucket] {
-        guard gridSize > 0 else { return [] }
-        struct Acc { var count = 0; var active = 0; var drop = 0; var maxDrop = 0 }
-        var map: [GridKey: Acc] = [:]
-        for e in entities {
-            let key = GridKey(gx: floorDiv(e.x, gridSize), gy: floorDiv(e.y, gridSize))
-            var a = map[key] ?? Acc()
-            a.count += 1
-            if e.isActive { a.active += 1 }
-            a.drop += e.deathDropCoins
-            a.maxDrop = max(a.maxDrop, e.deathDropCoins)
-            map[key] = a
+    /// 邻近聚类：距离 ≤ radius 的两人连边，连通分量成团。
+    /// 排除原点 10 万内（|x|、|y| 均 < 100_000）的实体——该区域过于拥挤，邻近统计无参考价值。
+    /// 仅返回人数 ≥ 2 的团（单人无“聚集”意义）。
+    /// 用 radius 边长网格做邻域剪枝，避免全量 O(n²) 在 n 很大时过慢。
+    static func clusters(_ entities: [Entity], radius: Int) -> [ProximityCluster] {
+        let entities = entities.filter { !$0.isWithin100k }
+        guard radius > 0, entities.count >= 2 else { return [] }
+
+        let n = entities.count
+        var parent = Array(0..<n)
+        var rank = [Int](repeating: 0, count: n)
+
+        func find(_ i: Int) -> Int {
+            var i = i
+            while parent[i] != i {
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            }
+            return i
         }
-        return map.map { key, a in
-            GridBucket(gx: key.gx, gy: key.gy, gridSize: gridSize,
-                       count: a.count, activeCount: a.active,
-                       totalDrop: a.drop, maxDrop: a.maxDrop)
+        func union(_ a: Int, _ b: Int) {
+            var ra = find(a), rb = find(b)
+            if ra == rb { return }
+            if rank[ra] < rank[rb] { swap(&ra, &rb) }
+            parent[rb] = ra
+            if rank[ra] == rank[rb] { rank[ra] += 1 }
         }
+
+        // 网格索引：只检查自身格 + 相邻 8 格内的点
+        var cells: [GridKey: [Int]] = [:]
+        cells.reserveCapacity(n)
+        for i in 0..<n {
+            let key = GridKey(gx: floorDiv(entities[i].x, radius),
+                              gy: floorDiv(entities[i].y, radius))
+            cells[key, default: []].append(i)
+        }
+
+        let r2 = radius * radius
+        for (key, idxs) in cells {
+            for dgx in -1...1 {
+                for dgy in -1...1 {
+                    let other = cells[GridKey(gx: key.gx + dgx, gy: key.gy + dgy)] ?? []
+                    // 同格：两两比；跨格：只比 idxs 与 other，避免重复（用 key 序约束）
+                    if dgx == 0 && dgy == 0 {
+                        for a in 0..<idxs.count {
+                            let i = idxs[a]
+                            let ei = entities[i]
+                            for b in (a + 1)..<idxs.count {
+                                let j = idxs[b]
+                                let ej = entities[j]
+                                let dx = ei.x - ej.x, dy = ei.y - ej.y
+                                if dx * dx + dy * dy <= r2 { union(i, j) }
+                            }
+                        }
+                    } else if dgx > 0 || (dgx == 0 && dgy > 0) {
+                        for i in idxs {
+                            let ei = entities[i]
+                            for j in other {
+                                let ej = entities[j]
+                                let dx = ei.x - ej.x, dy = ei.y - ej.y
+                                if dx * dx + dy * dy <= r2 { union(i, j) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 按根收集成员
+        var groups: [Int: [Int]] = [:]
+        for i in 0..<n {
+            groups[find(i), default: []].append(i)
+        }
+
+        var result: [ProximityCluster] = []
+        result.reserveCapacity(groups.count)
+        for (root, members) in groups where members.count >= 2 {
+            var active = 0, totalDrop = 0, maxDrop = 0
+            var sumX = 0, sumY = 0
+            var minX = Int.max, maxX = Int.min, minY = Int.max, maxY = Int.min
+            var ranked: [(drop: Int, name: String)] = []
+            ranked.reserveCapacity(members.count)
+            for i in members {
+                let e = entities[i]
+                if e.isActive { active += 1 }
+                totalDrop += e.deathDropCoins
+                maxDrop = max(maxDrop, e.deathDropCoins)
+                sumX += e.x; sumY += e.y
+                minX = min(minX, e.x); maxX = max(maxX, e.x)
+                minY = min(minY, e.y); maxY = max(maxY, e.y)
+                ranked.append((e.deathDropCoins, e.name))
+            }
+            ranked.sort { $0.drop > $1.drop }
+            let top = ranked.prefix(6).map(\.name)
+            let c = members.count
+            result.append(ProximityCluster(
+                id: root,
+                radius: radius,
+                count: c,
+                activeCount: active,
+                totalDrop: totalDrop,
+                maxDrop: maxDrop,
+                centerX: sumX / c,
+                centerY: sumY / c,
+                minX: minX, maxX: maxX, minY: minY, maxY: maxY,
+                topNames: top
+            ))
+        }
+        return result
     }
 
     static func summary(_ entities: [Entity]) -> SnapshotSummary {

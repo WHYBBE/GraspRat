@@ -57,9 +57,9 @@ final class SnapshotStore: ObservableObject {
         snapshot.map { SpatialAggregator.summary($0.entities) }
     }
 
-    /// 按 gridSize×gridSize 网格聚合
-    func buckets(gridSize: Int) -> [GridBucket] {
-        SpatialAggregator.buckets(snapshot?.entities ?? [], gridSize: gridSize)
+    /// 邻近聚类（距离 ≤ radius；排除 10 万内；仅 ≥2 人）
+    func clusters(radius: Int) -> [ProximityCluster] {
+        SpatialAggregator.clusters(snapshot?.entities ?? [], radius: radius)
     }
 
     // MARK: - 网络（仅刷新时调用）
