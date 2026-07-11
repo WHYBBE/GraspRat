@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grasp Rat Intel Overlay
 // @namespace    https://grasp-rat-game.h-e.top/
-// @version      0.6.0
+// @version      0.6.9
 // @description  纯信息层：合并全场实时/快照/小地图数据标记场上玩家，富敌高亮，活人显示名字与血量，原生面板按绘制签名直接不绘制，不做任何自动操作。
 // @match        https://grasp-rat-game.h-e.top/*
 // @run-at       document-end
@@ -38,7 +38,8 @@
     const MOVING_ENEMY_MEMORY_MS = 10000;
     const ENEMY_MOVE_EPSILON_CM = 30;
     const ENEMY_MEMORY_KEEP_MS = MOVING_ENEMY_MEMORY_MS * 3;
-    const CANVAS_MAX_DPR = 1.75;
+    // 与游戏一致：不压低 dpr，避免缩放/高分屏标注漂移。
+    const CANVAS_MAX_DPR = 4;
     // 静止（僵尸）血条只在“最近掉血”后这段时间内显示。
     // 这游戏血量不回，永久残血几乎人人都是，所以不能用 hp<max 判断，
     // 只能记录 HP 变化：检测到 HP 下降后的这段时间内才给静止僵尸显示血条。
@@ -62,6 +63,11 @@
     const SELF_HP_BAR_W = 200;
     const SELF_HP_BAR_H = 14;
     const SELF_HP_TOP = 12;
+    // 近距标签防重叠：屏幕距离小于此值时纵向错开名字/掉落标注。
+    const LABEL_STACK_DIST = 42;
+    const LABEL_STACK_STEP = 10;
+    // 默认视野 100m 时 scale=1；放大视野（缩小地图）后数字会挤爆，按 scale 做 LOD。
+    // DEFAULT_VIEW_RADIUS_CM = 10000 → scale = viewRadiusCm / 10000。
 
     // 隐藏原生面板：按“绘制签名”识别，而不是复刻坐标。
     // 游戏 drawEntity 每个面板都先用唯一底色画背景框，再用等宽字体画各行文字：
@@ -72,7 +78,7 @@
     // 不依赖任何坐标换算（worldToScreen 把相机烘进数学式里，canvas 变换恒为 dpr）。
     const PANEL_BG_RAW = 'rgba(15, 23, 42, .76)';
     // 文字命中面板矩形时的容差（等宽字体量宽和端上细微差异）。
-    const PANEL_HIT_PAD = 4;
+    const PANEL_HIT_PAD = 10;
 
     // 金币档位阈值，按 log 递增：5 / 10 / 20 / 50 / 100 / 200。
     const DROP_TIERS = [
@@ -108,6 +114,14 @@
       }
     };
 
+    // 与游戏 draw() 同一套实体坐标（插值+smooth）。没有则退回 state.entities。
+    function gameRenderEntities() {
+      try {
+        if (typeof getRenderEntities === "function") return getRenderEntities() || [];
+      } catch (_) {}
+      return (typeof state !== "undefined" && state && state.entities) || [];
+    }
+
     let waitTimer = 0;
     let waitCount = 0;
 
@@ -135,94 +149,111 @@
       const panel = document.createElement("div");
       panel.id = PANEL_ID;
       panel.innerHTML = [
+        '<div class="intel-legend" data-intel="legend"></div>',
+        '<div class="intel-row">',
+        '<button type="button" data-intel="legend-toggle" title="图例">图例</button>',
         '<button type="button" data-intel="toggle">情报层 ON</button>',
-        '<div class="intel-legend" data-intel="legend"></div>'
+        '</div>'
       ].join("");
 
       const style = document.createElement("style");
       style.textContent = `
         #${CANVAS_ID} {
-          position: fixed;
-          inset: 0;
-          width: 100%;
-          height: 100%;
+          position: absolute;
+          left: 0;
+          top: 0;
           display: block;
           pointer-events: none;
-          z-index: 2147483600;
+          /* 低于左侧 .side(z-index:20)，避免圆点盖住原生信息面板 */
+          z-index: 10;
         }
         #${PANEL_ID} {
           position: fixed;
-          top: 14px;
-          right: 14px;
-          z-index: 2147483601;
-          display: grid;
-          gap: 6px;
-          justify-items: end;
-          font: 13px/1.35 "Microsoft YaHei", "Microsoft YaHei UI", Arial, sans-serif;
+          right: 12px;
+          bottom: 12px;
+          z-index: 30;
+          display: flex;
+          flex-direction: column;
+          align-items: flex-end;
+          gap: 4px;
+          font: 12px/1.3 "Microsoft YaHei", "Microsoft YaHei UI", Arial, sans-serif;
           color: #e5edf8;
           pointer-events: none;
           text-shadow: 0 0 6px rgba(2, 6, 23, .7);
         }
+        #${PANEL_ID} .intel-row {
+          display: flex;
+          gap: 4px;
+          pointer-events: auto;
+        }
         #${PANEL_ID} button {
-          min-height: 30px;
-          padding: 0 12px;
+          min-height: 26px;
+          padding: 0 10px;
           color: #bae6fd;
-          background: rgba(2, 6, 23, .55);
+          background: rgba(2, 6, 23, .62);
           border: 1px solid rgba(56, 189, 248, .42);
           border-radius: 4px;
           cursor: pointer;
           font: inherit;
-          letter-spacing: .06em;
-          pointer-events: auto;
+          letter-spacing: .04em;
         }
-        #${PANEL_ID} button:hover { background: rgba(8, 47, 73, .72); }
-        #${PANEL_ID}.off button {
+        #${PANEL_ID} button:hover { background: rgba(8, 47, 73, .78); }
+        #${PANEL_ID}.off button[data-intel="toggle"] {
           color: rgba(148, 163, 184, .85);
           border-color: rgba(148, 163, 184, .35);
         }
         #${PANEL_ID} .intel-legend {
-          display: grid;
-          gap: 3px;
-          padding: 7px 9px;
-          background: rgba(2, 6, 23, .5);
+          display: none;
+          gap: 2px;
+          padding: 6px 8px;
+          background: rgba(2, 6, 23, .72);
           border: 1px solid rgba(125, 211, 252, .16);
           border-radius: 4px;
+          max-width: 168px;
         }
-        #${PANEL_ID}.off .intel-legend { display: none; }
+        #${PANEL_ID}.legend-open .intel-legend { display: grid; }
+        #${PANEL_ID}.off .intel-legend { display: none !important; }
         #${PANEL_ID} .intel-legend-row {
           display: flex;
           align-items: center;
-          gap: 7px;
+          gap: 6px;
           justify-content: flex-end;
           color: rgba(226, 232, 240, .82);
-          font-size: 12px;
+          font-size: 11px;
         }
         #${PANEL_ID} .intel-dot {
-          width: 12px;
-          height: 12px;
+          width: 10px;
+          height: 10px;
           border-radius: 50%;
-          box-shadow: 0 0 6px currentColor;
+          box-shadow: 0 0 5px currentColor;
         }
         #${PANEL_ID} .intel-note {
-          margin-top: 3px;
-          color: rgba(148, 163, 184, .8);
-          font-size: 11px;
+          margin-top: 2px;
+          color: rgba(148, 163, 184, .78);
+          font-size: 10px;
+          text-align: right;
         }
       `;
 
       document.head.appendChild(style);
-      document.body.appendChild(canvasEl);
+      // 挂到 #world 同级 .map-shell，与游戏 canvas 同盒模型，缩放时不漂移。
+      const mapShell = document.querySelector(".map-shell")
+        || (document.getElementById("world") && document.getElementById("world").parentElement)
+        || document.body;
+      mapShell.appendChild(canvasEl);
       document.body.appendChild(panel);
 
       const ctx = canvasEl.getContext("2d");
+      let drawCtx = ctx;
       const toggleBtn = panel.querySelector('[data-intel="toggle"]');
+      const legendToggleBtn = panel.querySelector('[data-intel="legend-toggle"]');
       const legend = panel.querySelector('[data-intel="legend"]');
 
-      // 图例：颜色档 + 活跃/非活跃说明。
+      // 图例默认折叠。
       legend.innerHTML = DROP_TIERS
         .map(tier => `<div class="intel-legend-row"><span>${tier.label}</span><span class="intel-dot" style="color:rgba(${tier.color},1)"></span></div>`)
         .join("")
-        + '<div class="intel-note">活跃=呼吸环+血量+名字 / 静止=稳定环(挨打才显血) / 边缘=视野外</div>';
+        + '<div class="intel-note">活跃=环+血+名 · 静=点 · 边=外</div>';
 
       const overlay = {
         raf: 0,
@@ -242,7 +273,10 @@
         // 的参数同在一套 CSS 像素用户坐标里（游戏用数学做相机，canvas 变换恒为 dpr），
         // 所以无需任何坐标换算，且能覆盖 state.entities 之外的 farSnapshot（外圈）实体面板。
         panelRects: [],
-        suppressActive: false
+        suppressActive: false,
+        drawWrapped: false,
+        origDraw: null,
+        paintingIntel: false
       };
       window[OVERLAY_KEY] = overlay;
 
@@ -296,17 +330,34 @@
         const inLiveZone = (x, y) => haveCenter
           && ((x - cx) * (x - cx) + (y - cy) * (y - cy)) <= liveZoneSq;
 
-        for (const entity of state.entities || []) {
-          const userId = Number(entity.user_id);
+        // 1) 游戏 getRenderEntities：与圆点/原生标签同一插值坐标（防缩放乱飞）。
+        for (const entity of gameRenderEntities()) {
+          const userId = Number(entity && entity.user_id);
           if (!Number.isFinite(userId) || userId === meId) continue;
           if (!isAliveEntity(entity)) continue;
           const x = Number(entity.x);
           const y = Number(entity.y);
           if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
           byId.set(userId, {
-            userId,
-            x,
-            y,
+            userId, x, y,
+            drop: enemyDrop(entity),
+            name: resolvePlayerName(userId, entity),
+            source: entity.farSnapshot ? "far-render" : "render",
+            entity
+          });
+        }
+
+        // 2) 实时 entities 补漏
+        for (const entity of state.entities || []) {
+          const userId = Number(entity.user_id);
+          if (!Number.isFinite(userId) || userId === meId) continue;
+          if (!isAliveEntity(entity)) continue;
+          if (byId.has(userId)) continue;
+          const x = Number(entity.x);
+          const y = Number(entity.y);
+          if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+          byId.set(userId, {
+            userId, x, y,
             drop: enemyDrop(entity),
             name: resolvePlayerName(userId, entity),
             source: "entity",
@@ -314,23 +365,20 @@
           });
         }
 
-        // farSnapshot：30s 全场快照，实体结构同 state.entities（含 hp/name/life）。
+        // 3) farSnapshot 补中远圈（实时区外）
         const far = state.farSnapshot && Array.isArray(state.farSnapshot.entities)
           ? state.farSnapshot.entities : [];
         for (const entity of far) {
           const userId = Number(entity && entity.user_id);
           if (!Number.isFinite(userId) || userId === meId) continue;
           if (!isAliveEntity(entity)) continue;
-          if (byId.has(userId)) continue; // 已有实时实体，实时优先。
+          if (byId.has(userId)) continue;
           const x = Number(entity.x);
           const y = Number(entity.y);
           if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-          // 落在实时区内却不在实时 entities 里 → 已死/离线的陈旧快照，丢弃。
           if (inLiveZone(x, y)) continue;
           byId.set(userId, {
-            userId,
-            x,
-            y,
+            userId, x, y,
             drop: enemyDrop(entity),
             name: resolvePlayerName(userId, entity),
             source: "far",
@@ -338,6 +386,7 @@
           });
         }
 
+        // 4) minimap 补极远
         const points = state.minimap && Array.isArray(state.minimap.points) ? state.minimap.points : [];
         for (const point of points) {
           const userId = Number(point && (point.u ?? point.user_id));
@@ -348,10 +397,8 @@
           const drop = Number(point && (point.d ?? point.drop ?? point.death_reward_preview ?? point.death_drop_coins)) || 0;
           const existing = byId.get(userId);
           if (existing) {
-            // 已有实体：保留实时坐标，仅在 minimap Drop 更高时更新。
             if (drop > existing.drop) existing.drop = drop;
           } else {
-            // 实时区内却没有对应实体 → 已死/离线的陈旧点，丢弃（反 desync 核心）。
             if (inLiveZone(x, y)) continue;
             byId.set(userId, {
               userId, x, y, drop,
@@ -408,6 +455,51 @@
         return DROP_TIERS[DROP_TIERS.length - 1];
       }
 
+      // 缩放只调“密度”（去重间距/边缘数量/标记大小），不提高 drop 阈值。
+      // 远景仍显示 ≥5 的数字；过密时由屏幕去重保留高 drop。
+      function labelPolicy(view) {
+        const scale = Math.max(0.1, Number(view && view.scale) || 1);
+        // scale≈1: 100m；≈5: 500m；≈10: 1km；≈50+: 5km+
+        if (scale <= 2) {
+          return { minDrop: LABEL_MIN_DROP, minLabelPx: 28, edgeMin: LABEL_MIN_DROP, edgeMax: 16, markerScale: 1 };
+        }
+        if (scale <= 6) {
+          return { minDrop: LABEL_MIN_DROP, minLabelPx: 32, edgeMin: LABEL_MIN_DROP, edgeMax: 14, markerScale: 0.95 };
+        }
+        if (scale <= 15) {
+          return { minDrop: LABEL_MIN_DROP, minLabelPx: 36, edgeMin: LABEL_MIN_DROP, edgeMax: 12, markerScale: 0.85 };
+        }
+        if (scale <= 40) {
+          return { minDrop: LABEL_MIN_DROP, minLabelPx: 40, edgeMin: LABEL_MIN_DROP, edgeMax: 12, markerScale: 0.75 };
+        }
+        return { minDrop: LABEL_MIN_DROP, minLabelPx: 44, edgeMin: LABEL_MIN_DROP, edgeMax: 12, markerScale: 0.65 };
+      }
+
+      // 屏幕空间贪心：高 drop / 活跃优先，近距离只留一个数字（远景仍参与标注）。
+      function selectLabeled(markers, policy) {
+        const cand = markers
+          .filter(m => m.drop >= policy.minDrop)
+          .sort((a, b) => {
+            if (a.drop !== b.drop) return b.drop - a.drop;
+            return Number(b.active) - Number(a.active);
+          });
+        const kept = [];
+        const minPx = policy.minLabelPx;
+        for (const m of cand) {
+          let clash = false;
+          for (const k of kept) {
+            if (Math.hypot(m.point.x - k.point.x, m.point.y - k.point.y) < minPx) {
+              clash = true;
+              break;
+            }
+          }
+          if (!clash) kept.push(m);
+        }
+        const set = new Set(kept);
+        for (const m of markers) m.showDropLabel = set.has(m);
+        return kept;
+      }
+
       function canvasRect() {
         const worldCanvas = typeof canvas !== "undefined" ? canvas : document.getElementById("world");
         if (worldCanvas && typeof worldCanvas.getBoundingClientRect === "function") {
@@ -417,8 +509,11 @@
         return document.body.getBoundingClientRect();
       }
 
-      // 优先使用平滑视觉坐标，减少抖动。
+      // render/far-render 已是 getRenderEntities 插值坐标，直接用；其它来源再读 visualEntities。
       function renderWorldPoint(player) {
+        if (player.source === "render" || player.source === "far-render") {
+          return { x: player.x, y: player.y };
+        }
         const userId = Number(player.userId);
         const visuals = state.visualEntities;
         if (Number.isFinite(userId) && visuals && typeof visuals.get === "function") {
@@ -441,7 +536,34 @@
       // 这个颜色全局只有面板在用。fillStyle 读回时浏览器会归一化（.76 -> 0.76），
       // 所以只匹配稳定的 rgb 片段 "15, 23, 42"。
       function isPanelBg(style) {
-        return typeof style === "string" && style.indexOf("15, 23, 42") !== -1;
+        if (style == null) return false;
+        const s = String(style);
+        if (s.indexOf("15, 23, 42") !== -1) return true;
+        if (s.indexOf("15,23,42") !== -1) return true;
+        if (/rgba?\(\s*15[\s,]+23[\s,]+42\b/i.test(s)) return true;
+        if (/#0f172a([0-9a-f]{2})?\b/i.test(s)) return true;
+        const m = s.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*([\d.]+))?/i);
+        if (m) {
+          const r = +m[1], g = +m[2], b = +m[3];
+          const a = m[4] == null ? 1 : +m[4];
+          // 深 slate + 半透明 ≈ 面板底色
+          if (r <= 30 && g <= 40 && b <= 70 && a >= 0.55 && a <= 0.92) return true;
+        }
+        return false;
+      }
+
+      function isPanelText(text) {
+        if (typeof text !== "string") return false;
+        if (/^(HP |Drop |STA |INV |Loss |User )/i.test(text)) return true;
+        if (/ DEAD$/i.test(text)) return true;
+        if (/^STA\s/i.test(text) || /^Drop\s/i.test(text) || /^Loss\s/i.test(text)) return true;
+        if (/^INV\s/i.test(text) || /^HP\s/i.test(text)) return true;
+        return false;
+      }
+
+      function isPanelFont(font) {
+        const f = String(font || "");
+        return f.indexOf("11px") !== -1 && f.toLowerCase().indexOf("mono") !== -1;
       }
 
       // 文字锚点是否落在已记录的某个面板框内（含容差）。
@@ -484,32 +606,45 @@
           fillRect: gctx.fillRect
         };
 
-        const shouldSkipText = function (x, y) {
-          if (!overlay.suppressActive || !overlay.panelRects.length) return false;
-          return textInPanelRect(x, y);
+        const shouldSkipText = function (text, x, y, font) {
+          if (!overlay.enabled || overlay.paintingIntel) return false;
+          // 1) 落在已记录面板框内（含名字行）
+          if (overlay.panelRects.length && textInPanelRect(x, y)) return true;
+          // 2) 面板固定文案
+          if (isPanelText(text)) return true;
+          // 3) 11px mono 面板字体：拦名字行，放行金币数字与 server 幽灵字
+          if (isPanelFont(font)) {
+            const t = String(text == null ? "" : text);
+            if (t === "server") return false;
+            if (/^\d+$/.test(t)) return false;
+            return true;
+          }
+          return false;
         };
 
         gctx.fillText = function (text, x, y, maxWidth) {
-          if (shouldSkipText(x, y)) return;
+          if (shouldSkipText(text, x, y, this.font)) return;
           return orig.fillText.call(this, text, x, y, maxWidth);
         };
         gctx.strokeText = function (text, x, y, maxWidth) {
-          if (shouldSkipText(x, y)) return;
+          if (shouldSkipText(text, x, y, this.font)) return;
           return orig.strokeText.call(this, text, x, y, maxWidth);
         };
         gctx.fillRect = function (x, y, w, h) {
-          if (!overlay.suppressActive) return orig.fillRect.call(this, x, y, w, h);
-          // 帧起点：整块背景铺满 canvas -> 清空上一帧记录的面板框。
+          if (!overlay.enabled || overlay.paintingIntel) return orig.fillRect.call(this, x, y, w, h);
+          // 帧起点：整块背景铺满 canvas -> 清空上一帧面板框
           const cw = this.canvas ? this.canvas.clientWidth : 0;
           const ch = this.canvas ? this.canvas.clientHeight : 0;
           if (cw && ch && x <= 1 && y <= 1 && w >= cw - 2 && h >= ch - 2) {
             overlay.panelRects.length = 0;
             return orig.fillRect.call(this, x, y, w, h);
           }
-          // 面板底色框：记录矩形，跳过绘制。
-          if (isPanelBg(this.fillStyle)) {
-            if (overlay.panelRects.length < 512) overlay.panelRects.push({ x, y, w, h });
-            return;
+          // 面板底色：颜色 + 尺寸启发式
+          if (w > 24 && h > 24 && w < 360 && h < 160 && isPanelBg(this.fillStyle)) {
+            if (overlay.panelRects.length < 512) {
+              overlay.panelRects.push({ x: x - 2, y: y - 2, w: w + 4, h: h + 8 });
+            }
+            return; // 不画原生面板底
           }
           return orig.fillRect.call(this, x, y, w, h);
         };
@@ -532,26 +667,57 @@
             delete gctx.__intelHooked;
           } catch (_) {}
         }
+        if (overlay.drawWrapped && overlay.origDraw) {
+          try {
+            const g = typeof window !== "undefined" ? window : globalThis;
+            g.drawMinimap = overlay.origDraw;
+          } catch (_) {}
+          try { drawMinimap = overlay.origDraw; } catch (_) {}
+        }
         overlay.gctx = null;
         overlay.gctxOrig = null;
         overlay.gameCanvas = null;
         overlay.suppressActive = false;
         overlay.panelRects = [];
+        overlay.drawWrapped = false;
+        overlay.origDraw = null;
+        drawCtx = ctx;
       }
 
       function prepareCanvas() {
-        const width = Math.max(1, Math.round(window.innerWidth));
-        const height = Math.max(1, Math.round(window.innerHeight));
-        const dpr = Math.min(CANVAS_MAX_DPR, Math.max(1, Number(window.devicePixelRatio || 1)));
-        const pixelWidth = Math.max(1, Math.round(width * dpr));
-        const pixelHeight = Math.max(1, Math.round(height * dpr));
+        // 严格对齐游戏 resize()：同一 rect、同一 floor(dpr)、同一 CSS 像素用户空间。
+        // 远处误差随半径放大，通常是 canvas 几何/拉伸与 #world 不一致导致。
+        const world = findGameCanvas();
+        if (!world) {
+          return { width: 1, height: 1 };
+        }
+        const rect = world.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+        // 与 app.js resize() 一致
+        const cssW = Math.max(1, rect.width);
+        const cssH = Math.max(1, rect.height);
+        const pixelWidth = Math.max(1, Math.floor(cssW * dpr));
+        const pixelHeight = Math.max(1, Math.floor(cssH * dpr));
         if (canvasEl.width !== pixelWidth || canvasEl.height !== pixelHeight) {
           canvasEl.width = pixelWidth;
           canvasEl.height = pixelHeight;
-          canvasEl.style.width = width + "px";
-          canvasEl.style.height = height + "px";
         }
+        canvasEl.style.width = cssW + "px";
+        canvasEl.style.height = cssH + "px";
+        // 叠在 #world 上：相对父盒定位，避免 inset:0 与 world 实际盒不一致
+        const parent = canvasEl.parentElement;
+        if (parent && parent !== document.body) {
+          const pr = parent.getBoundingClientRect();
+          canvasEl.style.left = (rect.left - pr.left) + "px";
+          canvasEl.style.top = (rect.top - pr.top) + "px";
+          canvasEl.style.right = "auto";
+          canvasEl.style.bottom = "auto";
+        }
+        // viewParams 用 clientWidth/Height；与之对齐作为绘制用户空间
+        const width = Math.max(1, world.clientWidth || Math.round(cssW));
+        const height = Math.max(1, world.clientHeight || Math.round(cssH));
         overlay.dpr = dpr;
+        // 与游戏相同：setTransform(dpr) 后 1 用户单位 = 1 CSS 像素
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         ctx.clearRect(0, 0, width, height);
         return { width, height };
@@ -562,98 +728,125 @@
         ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
       }
 
-      function drawMarker(point, tier, active, pulse, drop, now, entity, name) {
-        const color = tier.color;
-        const baseRadius = tier.radius;
-        const emphasis = drop >= EMPHASIS_DROP;
+      // 近距标签：最多错开 1 档，避免堆叠把数字推飞到远离圆点。
+      // 真正的去重交给 selectLabeled（同屏只留高 drop）。
+      function assignLabelStacks(markers) {
+        const order = markers
+          .map((m, i) => ({ i, x: m.point.x, y: m.point.y, drop: m.drop }))
+          .sort((a, b) => a.y - b.y || a.x - b.x || b.drop - a.drop);
+        const stacks = new Array(markers.length).fill(0);
+        for (let a = 0; a < order.length; a++) {
+          const A = order[a];
+          let stack = 0;
+          for (let b = 0; b < a; b++) {
+            const B = order[b];
+            if (Math.hypot(A.x - B.x, A.y - B.y) < LABEL_STACK_DIST && stacks[B.i] === 0) {
+              stack = 1;
+              break;
+            }
+          }
+          stacks[A.i] = stack;
+        }
+        for (let i = 0; i < markers.length; i++) markers[i].labelStack = stacks[i];
+      }
 
-        ctx.save();
-        ctx.translate(point.x, point.y);
+      function drawMarker(point, tier, active, pulse, drop, now, entity, name, labelStack, showDropLabel, markerScale) {
+        const color = tier.color;
+        const ms = Number.isFinite(markerScale) ? markerScale : 1;
+        const baseRadius = Math.max(4, tier.radius * ms);
+        const emphasis = drop >= EMPHASIS_DROP;
+        const stack = labelStack || 0;
+        const labelLift = stack * LABEL_STACK_STEP;
+
+        drawCtx.save();
+        drawCtx.translate(point.x, point.y);
 
         if (active) {
           // 活跃玩家一律强化：全都画向外扩散的呼吸环（富敌再加一圈更大更亮的）。
           const expand = (now % 1600) / 1600;
-          ctx.beginPath();
-          ctx.arc(0, 0, baseRadius + 4 + expand * (emphasis ? 22 : 14), 0, Math.PI * 2);
-          ctx.lineWidth = emphasis ? 2.4 : 1.8;
-          ctx.setLineDash([]);
-          ctx.strokeStyle = `rgba(${color}, ${(1 - expand) * (emphasis ? 0.6 : 0.45)})`;
-          ctx.shadowBlur = 0;
-          ctx.stroke();
+          drawCtx.beginPath();
+          drawCtx.arc(0, 0, baseRadius + 4 + expand * (emphasis ? 22 : 14), 0, Math.PI * 2);
+          drawCtx.lineWidth = emphasis ? 2.4 : 1.8;
+          drawCtx.setLineDash([]);
+          drawCtx.strokeStyle = `rgba(${color}, ${(1 - expand) * (emphasis ? 0.6 : 0.45)})`;
+          drawCtx.shadowBlur = 0;
+          drawCtx.stroke();
 
           // 活跃：实心圈 + 呼吸光晕。全体活跃都比原来更亮，富敌更甚。
           const glow = (emphasis ? 14 : 10) + pulse * (emphasis ? 16 : 12);
           const ringAlpha = 0.9 + pulse * 0.1;
 
-          ctx.beginPath();
-          ctx.arc(0, 0, baseRadius, 0, Math.PI * 2);
-          ctx.fillStyle = `rgba(${color}, ${(emphasis ? 0.28 : 0.2) + pulse * 0.12})`;
-          ctx.fill();
+          drawCtx.beginPath();
+          drawCtx.arc(0, 0, baseRadius, 0, Math.PI * 2);
+          drawCtx.fillStyle = `rgba(${color}, ${(emphasis ? 0.28 : 0.2) + pulse * 0.12})`;
+          drawCtx.fill();
 
-          ctx.lineWidth = emphasis ? 3.4 : 2.8;
-          ctx.setLineDash([]);
-          ctx.strokeStyle = `rgba(${color}, ${ringAlpha})`;
-          ctx.shadowBlur = glow;
-          ctx.shadowColor = `rgba(${color}, .9)`;
-          ctx.stroke();
+          drawCtx.lineWidth = emphasis ? 3.4 : 2.8;
+          drawCtx.setLineDash([]);
+          drawCtx.strokeStyle = `rgba(${color}, ${ringAlpha})`;
+          drawCtx.shadowBlur = glow;
+          drawCtx.shadowColor = `rgba(${color}, .9)`;
+          drawCtx.stroke();
         } else {
           // 静止（挂机）：不再虚化消失，改用清晰但“稳定”的状态标识——
           // 实心稳定环（不呼吸）+ 中心点，与活跃的呼吸/扩散区分，一眼能认出“在场但没动”。
-          ctx.beginPath();
-          ctx.arc(0, 0, baseRadius, 0, Math.PI * 2);
-          ctx.fillStyle = `rgba(${color}, .1)`;
-          ctx.fill();
-          ctx.lineWidth = 2;
-          ctx.setLineDash([]);
-          ctx.strokeStyle = `rgba(${color}, .78)`;
-          ctx.shadowBlur = 0;
-          ctx.stroke();
+          drawCtx.beginPath();
+          drawCtx.arc(0, 0, baseRadius, 0, Math.PI * 2);
+          drawCtx.fillStyle = `rgba(${color}, .1)`;
+          drawCtx.fill();
+          drawCtx.lineWidth = 2;
+          drawCtx.setLineDash([]);
+          drawCtx.strokeStyle = `rgba(${color}, .78)`;
+          drawCtx.shadowBlur = 0;
+          drawCtx.stroke();
           // 中心实心点：静止标识。
-          ctx.beginPath();
-          ctx.arc(0, 0, Math.max(1.6, baseRadius * 0.28), 0, Math.PI * 2);
-          ctx.fillStyle = `rgba(${color}, .9)`;
-          ctx.fill();
+          drawCtx.beginPath();
+          drawCtx.arc(0, 0, Math.max(1.6, baseRadius * 0.28), 0, Math.PI * 2);
+          drawCtx.fillStyle = `rgba(${color}, .9)`;
+          drawCtx.fill();
         }
 
         // 血条（原生面板已被隐藏，血量得由我们补回来）。仅可见实体有 hp 数据。
         // 活跃玩家一直显示血量；静止（僵尸）只有“最近刚掉血”才显示——
         // 因为血量不回，用 hp<max 判断会让所有被打过的僵尸永久挂血条。
-        let hpBottom = -baseRadius - 4;
+        // 标签紧贴圆环上方；labelLift 最多 1 档，防止数字飞离本体。
+        let hpBottom = -baseRadius - 2 - labelLift;
         if (entity) {
           const damagedRecently = recentlyDamaged(entity.user_id, now);
           if (active || damagedRecently) {
-            const drawn = drawHpBar(0, -baseRadius - 4, entity);
-            if (drawn) hpBottom = -baseRadius - 4 - HP_BAR_H - HP_BAR_GAP;
+            const drawn = drawHpBar(0, -baseRadius - 2 - labelLift, entity);
+            if (drawn) hpBottom = -baseRadius - 2 - labelLift - HP_BAR_H - HP_BAR_GAP;
           }
         }
 
-        // 金币数字：>=5 起标注（与 >=5 特殊色一致），放在血条上方。
-        if (drop >= LABEL_MIN_DROP) {
-          drawDropLabel(0, hpBottom - 3, drop, color, active, emphasis);
+        // 金币数字：贴在环上，由 LOD + 屏幕去重决定是否画。
+        if (showDropLabel && drop >= LABEL_MIN_DROP) {
+          drawDropLabel(0, hpBottom - 1, drop, color, active, emphasis);
         }
 
         // 只有活跃玩家显示名字；静止（僵尸/挂机）不显示，减少画面噪音。
+        // 近距时向下错开，避免多人名字叠成一团。
         if (active && entity && name) {
-          drawNameLabel(0, baseRadius + 4, name, color, active);
+          drawNameLabel(0, baseRadius + 4 + labelLift, name, color, active);
         }
 
-        ctx.restore();
+        drawCtx.restore();
       }
 
       // 玩家名字标签：画在标记正下方，深色描边保证任何背景下都清晰。
       function drawNameLabel(x, y, name, color, active) {
         let text = String(name);
         if (text.length > NAME_MAX_CHARS) text = text.slice(0, NAME_MAX_CHARS - 1) + "…";
-        ctx.setLineDash([]);
-        ctx.textAlign = "center";
-        ctx.textBaseline = "top";
-        ctx.font = `${active ? 600 : 500} 12px "Microsoft YaHei", Arial, sans-serif`;
-        ctx.shadowBlur = 0;
-        ctx.lineWidth = 3;
-        ctx.strokeStyle = "rgba(2, 6, 23, .9)";
-        ctx.strokeText(text, x, y);
-        ctx.fillStyle = active ? "rgba(236, 244, 255, .98)" : "rgba(203, 213, 225, .82)";
-        ctx.fillText(text, x, y);
+        drawCtx.setLineDash([]);
+        drawCtx.textAlign = "center";
+        drawCtx.textBaseline = "top";
+        drawCtx.font = `${active ? 600 : 500} 12px "Microsoft YaHei", Arial, sans-serif`;
+        drawCtx.shadowBlur = 0;
+        drawCtx.lineWidth = 3;
+        drawCtx.strokeStyle = "rgba(2, 6, 23, .9)";
+        drawCtx.strokeText(text, x, y);
+        drawCtx.fillStyle = active ? "rgba(236, 244, 255, .98)" : "rgba(203, 213, 225, .82)";
+        drawCtx.fillText(text, x, y);
       }
 
       // 活跃玩家血条：画在标记正上方。返回是否真的画了（无 hp 数据则不画）。
@@ -667,33 +860,33 @@
         const x = cx - w / 2;
         const y = bottomY - h;
 
-        ctx.save();
-        ctx.setLineDash([]);
-        ctx.shadowBlur = 0;
+        drawCtx.save();
+        drawCtx.setLineDash([]);
+        drawCtx.shadowBlur = 0;
         // 底槽。
-        ctx.fillStyle = "rgba(2, 6, 23, .78)";
-        ctx.fillRect(x - 1, y - 1, w + 2, h + 2);
+        drawCtx.fillStyle = "rgba(2, 6, 23, .78)";
+        drawCtx.fillRect(x - 1, y - 1, w + 2, h + 2);
         // 血量：绿->黄->红 随比例过渡。
         let fill;
         if (ratio > 0.5) fill = "74, 222, 128";
         else if (ratio > 0.25) fill = "250, 204, 21";
         else fill = "248, 113, 113";
-        ctx.fillStyle = `rgba(${fill}, .95)`;
-        ctx.fillRect(x, y, w * ratio, h);
+        drawCtx.fillStyle = `rgba(${fill}, .95)`;
+        drawCtx.fillRect(x, y, w * ratio, h);
         // 边框。
-        ctx.lineWidth = 1;
-        ctx.strokeStyle = "rgba(226, 232, 240, .5)";
-        ctx.strokeRect(x, y, w, h);
+        drawCtx.lineWidth = 1;
+        drawCtx.strokeStyle = "rgba(226, 232, 240, .5)";
+        drawCtx.strokeRect(x, y, w, h);
 
         // 数字 HP。
-        ctx.font = '600 11px "Microsoft YaHei", Arial, sans-serif';
-        ctx.textAlign = "center";
-        ctx.textBaseline = "bottom";
-        ctx.fillStyle = "rgba(2, 6, 23, .9)";
-        ctx.fillText(Math.round(hp) + "/" + Math.round(maxHp), cx + 0.6, y - 1.4);
-        ctx.fillStyle = "rgba(236, 244, 255, .98)";
-        ctx.fillText(Math.round(hp) + "/" + Math.round(maxHp), cx, y - 2);
-        ctx.restore();
+        drawCtx.font = '600 11px "Microsoft YaHei", Arial, sans-serif';
+        drawCtx.textAlign = "center";
+        drawCtx.textBaseline = "bottom";
+        drawCtx.fillStyle = "rgba(2, 6, 23, .9)";
+        drawCtx.fillText(Math.round(hp) + "/" + Math.round(maxHp), cx + 0.6, y - 1.4);
+        drawCtx.fillStyle = "rgba(236, 244, 255, .98)";
+        drawCtx.fillText(Math.round(hp) + "/" + Math.round(maxHp), cx, y - 2);
+        drawCtx.restore();
         return true;
       }
 
@@ -720,101 +913,115 @@
         const ratio = Math.max(0, Math.min(1, hp / maxHp));
         const w = SELF_HP_BAR_W;
         const h = SELF_HP_BAR_H;
-        const x = Math.round(surface.width / 2 - w / 2);
+        // 对齐游戏视觉中心（screenCenter 已为左侧栏预留），而非整窗正中。
+        let cx = surface.width / 2;
+        try {
+          const view = viewParams();
+          if (view && Number.isFinite(view.cx)) cx = view.cx;
+        } catch (_) {}
+        const x = Math.round(cx - w / 2);
         const y = SELF_HP_TOP;
 
-        ctx.save();
-        ctx.setLineDash([]);
-        ctx.shadowBlur = 0;
+        drawCtx.save();
+        drawCtx.setLineDash([]);
+        drawCtx.shadowBlur = 0;
         // 底槽。
-        ctx.fillStyle = "rgba(2, 6, 23, .82)";
-        ctx.fillRect(x - 2, y - 2, w + 4, h + 4);
+        drawCtx.fillStyle = "rgba(2, 6, 23, .82)";
+        drawCtx.fillRect(x - 2, y - 2, w + 4, h + 4);
         // 血量：绿->黄->红。
         let fill;
         if (ratio > 0.5) fill = "74, 222, 128";
         else if (ratio > 0.25) fill = "250, 204, 21";
         else fill = "248, 113, 113";
-        ctx.fillStyle = `rgba(${fill}, .95)`;
-        ctx.fillRect(x, y, w * ratio, h);
+        drawCtx.fillStyle = `rgba(${fill}, .95)`;
+        drawCtx.fillRect(x, y, w * ratio, h);
         // 边框 + 低血时红色呼吸描边。
-        ctx.lineWidth = 1.5;
-        ctx.strokeStyle = ratio <= 0.25
+        drawCtx.lineWidth = 1.5;
+        drawCtx.strokeStyle = ratio <= 0.25
           ? `rgba(248, 113, 133, ${0.7 + 0.3 * Math.abs(Math.sin(Date.now() / 300))})`
           : "rgba(226, 232, 240, .55)";
-        ctx.strokeRect(x, y, w, h);
+        drawCtx.strokeRect(x, y, w, h);
         // 数字 HP。
-        ctx.font = '700 12px "Microsoft YaHei", Arial, sans-serif';
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
+        drawCtx.font = '700 12px "Microsoft YaHei", Arial, sans-serif';
+        drawCtx.textAlign = "center";
+        drawCtx.textBaseline = "middle";
         const label = "HP " + Math.round(hp) + " / " + Math.round(maxHp);
-        ctx.fillStyle = "rgba(2, 6, 23, .92)";
-        ctx.fillText(label, surface.width / 2 + 0.7, y + h / 2 + 0.7);
-        ctx.fillStyle = "rgba(240, 247, 255, .98)";
-        ctx.fillText(label, surface.width / 2, y + h / 2);
-        ctx.restore();
+        drawCtx.fillStyle = "rgba(2, 6, 23, .92)";
+        drawCtx.fillText(label, cx + 0.7, y + h / 2 + 0.7);
+        drawCtx.fillStyle = "rgba(240, 247, 255, .98)";
+        drawCtx.fillText(label, cx, y + h / 2);
+        drawCtx.restore();
       }
 
       // 金币数字。富敌活跃时加金币片背景，进一步突出。
       function drawDropLabel(x, y, drop, color, active, emphasis) {
         const text = String(drop);
-        ctx.setLineDash([]);
-        ctx.textAlign = "center";
-        ctx.textBaseline = "bottom";
+        drawCtx.setLineDash([]);
+        drawCtx.textAlign = "center";
+        drawCtx.textBaseline = "bottom";
         const fontSize = emphasis ? (active ? 17 : 14) : (active ? 15 : 13);
         const weight = active ? 700 : 500;
-        ctx.font = `${weight} ${fontSize}px "Microsoft YaHei", Arial, sans-serif`;
+        drawCtx.font = `${weight} ${fontSize}px "Microsoft YaHei", Arial, sans-serif`;
 
         if (emphasis && active) {
-          const w = ctx.measureText(text).width;
+          const w = drawCtx.measureText(text).width;
           const padX = 6;
           const chipW = w + padX * 2;
           const chipH = fontSize + 6;
           const chipX = x - chipW / 2;
           const chipY = y - chipH;
-          ctx.shadowBlur = 8;
-          ctx.shadowColor = `rgba(${color}, .8)`;
+          drawCtx.shadowBlur = 8;
+          drawCtx.shadowColor = `rgba(${color}, .8)`;
           roundRect(chipX, chipY, chipW, chipH, 4);
-          ctx.fillStyle = "rgba(2, 6, 23, .82)";
-          ctx.fill();
-          ctx.lineWidth = 1.4;
-          ctx.strokeStyle = `rgba(${color}, .95)`;
-          ctx.shadowBlur = 0;
-          ctx.stroke();
-          ctx.fillStyle = `rgba(${color}, 1)`;
-          ctx.fillText(text, x, y - 3);
+          drawCtx.fillStyle = "rgba(2, 6, 23, .82)";
+          drawCtx.fill();
+          drawCtx.lineWidth = 1.4;
+          drawCtx.strokeStyle = `rgba(${color}, .95)`;
+          drawCtx.shadowBlur = 0;
+          drawCtx.stroke();
+          drawCtx.fillStyle = `rgba(${color}, 1)`;
+          drawCtx.fillText(text, x, y - 3);
           return;
         }
 
         const labelAlpha = active ? 0.98 : 0.42;
-        ctx.shadowBlur = active ? 6 : 0;
-        ctx.shadowColor = "rgba(2, 6, 23, .9)";
-        ctx.lineWidth = 3;
-        ctx.strokeStyle = "rgba(2, 6, 23, .85)";
-        ctx.strokeText(text, x, y);
-        ctx.fillStyle = `rgba(${color}, ${labelAlpha})`;
-        ctx.fillText(text, x, y);
+        drawCtx.shadowBlur = active ? 6 : 0;
+        drawCtx.shadowColor = "rgba(2, 6, 23, .9)";
+        drawCtx.lineWidth = 3;
+        drawCtx.strokeStyle = "rgba(2, 6, 23, .85)";
+        drawCtx.strokeText(text, x, y);
+        drawCtx.fillStyle = `rgba(${color}, ${labelAlpha})`;
+        drawCtx.fillText(text, x, y);
       }
 
       function roundRect(x, y, w, h, r) {
         const radius = Math.min(r, w / 2, h / 2);
-        ctx.beginPath();
-        ctx.moveTo(x + radius, y);
-        ctx.arcTo(x + w, y, x + w, y + h, radius);
-        ctx.arcTo(x + w, y + h, x, y + h, radius);
-        ctx.arcTo(x, y + h, x, y, radius);
-        ctx.arcTo(x, y, x + w, y, radius);
-        ctx.closePath();
+        drawCtx.beginPath();
+        drawCtx.moveTo(x + radius, y);
+        drawCtx.arcTo(x + w, y, x + w, y + h, radius);
+        drawCtx.arcTo(x + w, y + h, x, y + h, radius);
+        drawCtx.arcTo(x, y + h, x, y, radius);
+        drawCtx.arcTo(x, y, x + w, y, radius);
+        drawCtx.closePath();
       }
 
       // 视野外玩家：贴到屏幕边缘，用朝外三角 + Drop 数字提示方位。
       function drawEdgeMarker(point, tier, drop, active, pulse, surface, now) {
-        const cx = surface.width / 2;
-        const cy = surface.height / 2;
+        // 以游戏视觉中心为锚（已为左侧栏预留），避免贴边方位偏到整窗中心。
+        let cx = surface.width / 2;
+        let cy = surface.height / 2;
+        try {
+          const view = viewParams();
+          if (view && Number.isFinite(view.cx) && Number.isFinite(view.cy)) {
+            cx = view.cx;
+            cy = view.cy;
+          }
+        } catch (_) {}
         let dx = point.x - cx;
         let dy = point.y - cy;
         if (!Number.isFinite(dx) || !Number.isFinite(dy) || (dx === 0 && dy === 0)) return;
-        const halfW = Math.max(1, surface.width / 2 - EDGE_MARGIN);
-        const halfH = Math.max(1, surface.height / 2 - EDGE_MARGIN);
+        const halfW = Math.max(1, Math.min(cx, surface.width - cx) - EDGE_MARGIN);
+        const halfH = Math.max(1, Math.min(cy, surface.height - cy) - EDGE_MARGIN);
         const scale = Math.min(halfW / Math.abs(dx || 1e-6), halfH / Math.abs(dy || 1e-6));
         const ex = cx + dx * scale;
         const ey = cy + dy * scale;
@@ -823,30 +1030,141 @@
         const emphasis = drop >= EMPHASIS_DROP;
         const size = emphasis ? 12 : 9;
 
-        ctx.save();
-        ctx.translate(ex, ey);
+        drawCtx.save();
+        drawCtx.translate(ex, ey);
 
         // 朝外的三角。
-        ctx.save();
-        ctx.rotate(angle);
-        ctx.beginPath();
-        ctx.moveTo(size, 0);
-        ctx.lineTo(-size * 0.7, size * 0.7);
-        ctx.lineTo(-size * 0.7, -size * 0.7);
-        ctx.closePath();
-        ctx.fillStyle = `rgba(${color}, ${active ? 0.92 : 0.5})`;
+        drawCtx.save();
+        drawCtx.rotate(angle);
+        drawCtx.beginPath();
+        drawCtx.moveTo(size, 0);
+        drawCtx.lineTo(-size * 0.7, size * 0.7);
+        drawCtx.lineTo(-size * 0.7, -size * 0.7);
+        drawCtx.closePath();
+        drawCtx.fillStyle = `rgba(${color}, ${active ? 0.92 : 0.5})`;
         if (emphasis && active) {
-          ctx.shadowBlur = 8 + pulse * 8;
-          ctx.shadowColor = `rgba(${color}, .8)`;
+          drawCtx.shadowBlur = 8 + pulse * 8;
+          drawCtx.shadowColor = `rgba(${color}, .8)`;
         }
-        ctx.fill();
-        ctx.restore();
+        drawCtx.fill();
+        drawCtx.restore();
 
         // Drop 数字放在三角内侧（朝屏幕中心方向偏移）。
         const labelX = -Math.cos(angle) * (size + 10);
         const labelY = -Math.sin(angle) * (size + 10);
         drawDropLabel(labelX, labelY + size * 0.5, drop, color, active, emphasis);
-        ctx.restore();
+        drawCtx.restore();
+      }
+
+      // 不能改 window.draw：游戏内部 rAF(draw) 绑定的是函数自身名字，外层替换无效。
+      // 改在 draw() 末尾必调的 drawMinimap 之后叠画，与本帧 world 绘制同一 ctx/变换。
+      function wrapGameDraw() {
+        if (overlay.drawWrapped) return true;
+        try {
+          const g = typeof window !== "undefined" ? window : globalThis;
+          let orig = null;
+          if (typeof drawMinimap === "function" && !drawMinimap.__intelWrapped) {
+            orig = drawMinimap;
+          } else if (typeof g.drawMinimap === "function" && !g.drawMinimap.__intelWrapped) {
+            orig = g.drawMinimap;
+          }
+          if (!orig) return false;
+          const wrapped = function () {
+            orig.apply(this, arguments);
+            if (overlay.enabled) {
+              try { paintIntelOnGame(); } catch (_) {}
+            }
+          };
+          wrapped.__intelWrapped = true;
+          try { g.drawMinimap = wrapped; } catch (_) {}
+          try { drawMinimap = wrapped; } catch (_) {}
+          overlay.origDraw = orig; // 复用字段存 orig drawMinimap
+          overlay.drawWrapped = true;
+          return true;
+        } catch (_) {
+          return false;
+        }
+      }
+
+      function paintIntelOnGame() {
+        const world = findGameCanvas();
+        if (!world) return;
+        let gctx;
+        try { gctx = world.getContext("2d"); } catch (_) { return; }
+        if (!gctx) return;
+        const width = Math.max(1, world.clientWidth || 1);
+        const height = Math.max(1, world.clientHeight || 1);
+        const dpr = window.devicePixelRatio || 1;
+        // 与游戏用户空间一致（resize 后 transform 为 dpr）
+        drawCtx = gctx;
+        overlay.paintingIntel = true;
+        try {
+          drawCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          paintIntel({ width, height });
+        } finally {
+          overlay.paintingIntel = false;
+          drawCtx = ctx;
+        }
+      }
+
+      function paintIntel(surface) {
+        let view = null;
+        try { view = viewParams(); } catch (_) { return; }
+        if (!view) return;
+
+        const now = Date.now();
+        const players = buildPlayers(view);
+        trackMotion(players, now);
+        const pulse = 0.5 + 0.5 * Math.sin(now / 600);
+        const policy = labelPolicy(view);
+        const onScreen = [];
+        const offScreen = [];
+
+        for (const player of players) {
+          const worldPt = renderWorldPoint(player);
+          let sp;
+          try {
+            sp = worldToScreen(Number(worldPt.x), Number(worldPt.y), view);
+          } catch (_) {
+            continue;
+          }
+          const localX = Number(sp.x);
+          const localY = Number(sp.y);
+          if (!Number.isFinite(localX) || !Number.isFinite(localY)) continue;
+          // 游戏网格用半像素；这里不 round，保持与 worldToScreen 浮点一致
+          const point = { x: localX, y: localY };
+          const drop = player.drop;
+          const tier = dropTier(drop);
+          const active = movedRecently(player.userId, now);
+          const margin = tier.radius * policy.markerScale + 24;
+          const visible = point.x >= -margin && point.y >= -margin
+            && point.x <= surface.width + margin && point.y <= surface.height + margin;
+          if (visible) {
+            onScreen.push({
+              point, tier, drop, active,
+              entity: player.entity, name: player.name,
+              labelStack: 0, showDropLabel: false
+            });
+          } else if (drop >= policy.edgeMin) {
+            offScreen.push({ point, tier, drop, active });
+          }
+        }
+
+        drawSelfHpBar(surface);
+        offScreen.sort((a, b) => b.drop - a.drop);
+        for (const marker of offScreen.slice(0, policy.edgeMax)) {
+          drawEdgeMarker(marker.point, marker.tier, marker.drop, marker.active, pulse, surface, now);
+        }
+        selectLabeled(onScreen, policy);
+        assignLabelStacks(onScreen.filter(m => m.showDropLabel || m.active));
+        onScreen.sort((a, b) => Number(a.active) - Number(b.active));
+        for (const marker of onScreen) {
+          drawMarker(
+            marker.point, marker.tier, marker.active, pulse, marker.drop,
+            now, marker.entity, marker.name, marker.labelStack,
+            marker.showDropLabel, policy.markerScale
+          );
+        }
       }
 
       function render() {
@@ -856,82 +1174,21 @@
             return;
           }
           hookGameCanvas();
-          const now = Date.now();
+          const wrapped = wrapGameDraw();
           if (document.hidden) {
-            overlay.suppressActive = false;
             clearCanvas();
             return;
           }
+          // 主路径：挂到游戏 draw，在同一 canvas/同一变换上画情报 → 中心到边缘零漂移
+          if (wrapped || overlay.drawWrapped) {
+            clearCanvas();
+            return;
+          }
+          // 回退：独立情报 canvas
           const surface = prepareCanvas();
-          const rect = canvasRect();
-          let view = null;
-          try {
-            view = viewParams();
-          } catch (_) {
-            overlay.suppressActive = false;
-            return;
-          }
-          if (!view) {
-            overlay.suppressActive = false;
-            return;
-          }
-
-          // 先算 view，再 buildPlayers——反 desync 的实时区判定要用相机中心。
-          const players = buildPlayers(view);
-          trackMotion(players, now);
-
-          const pulse = 0.5 + 0.5 * Math.sin(now / 600);
-
-          // 隐藏原生面板：只要 hook 成功就开启签名抑制，让游戏所有实体面板（近/远/自己）都不画。
-          // 抑制矩形由 hook 在游戏自身绘制时按底色签名记录，这里不再复刻任何坐标。
-          overlay.suppressActive = !!overlay.gctx;
-
-          const onScreen = [];        // 视野内：正常标记
-          const offScreen = [];       // 视野外：边缘雷达标记
-
-          for (const player of players) {
-            const world = renderWorldPoint(player);
-            let sp;
-            try {
-              sp = worldToScreen(Number(world.x), Number(world.y), view);
-            } catch (_) {
-              continue;
-            }
-            const localX = Number(sp.x);
-            const localY = Number(sp.y);
-            if (!Number.isFinite(localX) || !Number.isFinite(localY)) continue;
-            const winPoint = { x: rect.left + localX, y: rect.top + localY };
-            const drop = player.drop;
-            const tier = dropTier(drop);
-            const active = movedRecently(player.userId, now);
-
-            const margin = tier.radius + 24;
-            const visible = winPoint.x >= -margin && winPoint.y >= -margin
-              && winPoint.x <= surface.width + margin && winPoint.y <= surface.height + margin;
-
-            if (visible) {
-              onScreen.push({ point: winPoint, tier, drop, active, entity: player.entity, name: player.name });
-            } else if (drop >= EDGE_MIN_DROP) {
-              offScreen.push({ point: winPoint, tier, drop, active });
-            }
-          }
-
-          // 自己的血条：固定在屏幕顶部中间，醒目大条。
-          drawSelfHpBar(surface);
-
-          // 边缘雷达标记：Drop 高的优先，限制数量避免边缘拥挤。
-          offScreen.sort((a, b) => b.drop - a.drop);
-          for (const marker of offScreen.slice(0, EDGE_MAX_MARKERS)) {
-            drawEdgeMarker(marker.point, marker.tier, marker.drop, marker.active, pulse, surface, now);
-          }
-
-          // 视野内：先画挂机（虚化底层），再画活跃（强调压顶）。
-          onScreen.sort((a, b) => Number(a.active) - Number(b.active));
-          for (const marker of onScreen) {
-            drawMarker(marker.point, marker.tier, marker.active, pulse, marker.drop, now, marker.entity, marker.name);
-          }
+          drawCtx = ctx;
+          paintIntel(surface);
         } catch (_) {
-          overlay.suppressActive = false;
           clearCanvas();
         }
       }
@@ -953,10 +1210,15 @@
         panel.classList.toggle("off", !overlay.enabled);
         toggleBtn.textContent = overlay.enabled ? "情报层 ON" : "情报层 OFF";
         if (!overlay.enabled) {
-          // 关闭时恢复原生面板绘制。
           overlay.suppressActive = false;
           overlay.panelRects = [];
+          panel.classList.remove("legend-open");
+          if (legendToggleBtn) legendToggleBtn.textContent = "图例";
           clearCanvas();
+        } else {
+          hookGameCanvas();
+          wrapGameDraw();
+          overlay.suppressActive = !!overlay.gctx;
         }
       }
 
@@ -972,6 +1234,12 @@
       }
 
       toggleBtn.addEventListener("click", () => setEnabled(!overlay.enabled));
+      if (legendToggleBtn) {
+        legendToggleBtn.addEventListener("click", () => {
+          panel.classList.toggle("legend-open");
+          legendToggleBtn.textContent = panel.classList.contains("legend-open") ? "收起" : "图例";
+        });
+      }
 
       overlay.setEnabled = setEnabled;
       overlay.destroy = destroy;
