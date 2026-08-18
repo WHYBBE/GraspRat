@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grasp Rat Intel Overlay
 // @namespace    https://grasp-rat-game.h-e.top/
-// @version      0.17.0
+// @version      0.18.0
 // @description  纯信息层：合并全场实时/快照/小地图数据标记场上玩家，富敌高亮，Active=实线+名+残血HP，Passive=虚线(drop≥20标名)，原生面板按绘制签名直接不绘制，不做任何自动操作。
 // @match        https://grasp-rat-game.h-e.top/*
 // @run-at       document-end
@@ -915,9 +915,22 @@
           if (drawn) hpBottom = -baseRadius - 2 - labelLift - HP_BAR_H - HP_BAR_GAP;
         }
 
+        const invulnerableSecs = invulnerableRemainingSecs(entity);
+        if (invulnerableSecs > 0 && isAlive) {
+          drawInvulnerableLabel(0, hpBottom - 1, invulnerableSecs);
+        }
+
         // 金币数字：贴在环上，由 LOD + 屏幕去重决定是否画。
         if (showDropLabel && drop >= LABEL_MIN_DROP) {
-          drawDropLabel(0, hpBottom - 1, drop, color, active && isAlive, emphasis, isAlive);
+          drawDropLabel(
+            0,
+            hpBottom - 1 - (invulnerableSecs > 0 && isAlive ? 16 : 0),
+            drop,
+            color,
+            active && isAlive,
+            emphasis,
+            isAlive
+          );
         }
 
         // Active 始终显示名字；Passive 仅 drop≥20 才标名。
@@ -929,6 +942,34 @@
           }
         }
 
+        drawCtx.restore();
+      }
+
+      function invulnerableRemainingSecs(entity) {
+        if (!entity) return 0;
+        const direct = Number(entity.invulnerable_remaining_secs);
+        if (Number.isFinite(direct) && direct > 0) return Math.ceil(direct);
+        const ticks = Number(entity.invulnerable_remaining_ticks);
+        if (Number.isFinite(ticks) && ticks > 0) return Math.ceil(ticks / 20);
+        const untilTick = Number(entity.invulnerable_until_tick);
+        if (Number.isFinite(untilTick) && untilTick > 0) {
+          return Math.ceil(Math.max(0, untilTick - getRenderTick()) / 20);
+        }
+        return 0;
+      }
+
+      function drawInvulnerableLabel(x, y, seconds) {
+        const text = `INV ${seconds}s`;
+        drawCtx.save();
+        drawCtx.setLineDash([]);
+        drawCtx.textAlign = "center";
+        drawCtx.textBaseline = "bottom";
+        drawCtx.font = '700 12px "Microsoft YaHei", Arial, sans-serif';
+        drawCtx.lineWidth = 3;
+        drawCtx.strokeStyle = "rgba(2, 6, 23, .95)";
+        drawCtx.strokeText(text, x, y);
+        drawCtx.fillStyle = "rgba(103, 232, 249, .98)";
+        drawCtx.fillText(text, x, y);
         drawCtx.restore();
       }
 
