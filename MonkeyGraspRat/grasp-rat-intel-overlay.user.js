@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grasp Rat Intel Overlay
 // @namespace    https://grasp-rat-game.h-e.top/
-// @version      0.22.0
+// @version      0.25.4
 // @description  纯信息层：合并全场实时/快照/小地图数据标记场上玩家，富敌高亮，Active=实线+名+残血HP，Passive=虚线(drop≥20标名)，原生面板按绘制签名直接不绘制，不做任何自动操作。
 // @match        https://grasp-rat-game.h-e.top/*
 // @run-at       document-end
@@ -240,7 +240,7 @@
         }
         #${PANEL_ID} .intel-drop-item {
           display: grid;
-          grid-template-columns: minmax(120px, 1fr) 76px 78px;
+          grid-template-columns: minmax(105px, 1fr) 64px 72px 54px;
           grid-template-rows: auto auto;
           column-gap: 8px;
           align-items: center;
@@ -259,6 +259,21 @@
           text-align: left;
           text-overflow: ellipsis;
           white-space: nowrap;
+        }
+        #${PANEL_ID} .intel-drop-teleport {
+          min-height: 22px;
+          padding: 0 7px;
+          color: rgba(186, 230, 253, .96);
+          background: rgba(14, 116, 144, .28);
+          border: 1px solid rgba(103, 232, 249, .38);
+          border-radius: 4px;
+          cursor: pointer;
+          font-size: 10px;
+          font-weight: 700;
+        }
+        #${PANEL_ID} .intel-drop-teleport:hover {
+          background: rgba(14, 116, 144, .52);
+          border-color: rgba(103, 232, 249, .72);
         }
         #${PANEL_ID} .intel-drop-value {
           color: rgba(248, 250, 252, .98);
@@ -349,6 +364,7 @@
       const dropListRefreshBtn = panel.querySelector('[data-intel="drop-list-refresh"]');
       const legend = panel.querySelector('[data-intel="legend"]');
       const dropList = panel.querySelector('[data-intel="drop-list"]');
+      let dropListLastRenderAt = 0;
 
       // 图例默认折叠。
       legend.innerHTML = DROP_TIERS
@@ -414,26 +430,60 @@
         return `<span><i class="intel-stamina-bar" style="width:${(ratio * 100).toFixed(1)}%"></i><b class="intel-stamina-label">${key} ${Math.floor(value / 1000)}/${Math.floor(limit / 1000)}</b></span>`;
       }
 
-      function updateDropList(players) {
+      function updateDropList(players, force = false) {
         if (!dropList) return;
+        if (!panel.classList.contains("drop-list-open") && !force) return;
+        const now = Date.now();
+        if (!force && now - dropListLastRenderAt < 500) return;
+        dropListLastRenderAt = now;
         const rows = players
           .filter(player => player.entity)
           .sort((a, b) => b.drop - a.drop || String(a.name).localeCompare(String(b.name)))
           .slice(0, 100);
-        dropList.innerHTML = '<div class="intel-drop-head"><span>用户</span><span>Drop</span><span>状态</span></div>'
+        dropList.innerHTML = '<div class="intel-drop-head"><span>用户</span><span>Drop</span><span>状态</span><span>操作</span></div>'
           + (rows.length ? rows.map(player => {
             const entity = player.entity;
             const stamina = [staminaText(entity, "5s"), staminaText(entity, "1h"), staminaText(entity, "1d")];
             const low = stamina.some(value => value !== "--" && /^0\//.test(value));
             const mode = player.alive ? "Active" : "Passive";
-            return `<div class="intel-drop-item"><span class="intel-drop-name" title="${escapeHtml(player.name || player.userId)}">${escapeHtml(player.name || `User ${player.userId}`)}</span><span class="intel-drop-value">${player.drop}</span><span class="intel-drop-mode${player.alive ? "" : " passive"}">${mode}</span><span class="intel-stamina${low ? " warn" : ""}">${staminaCell(entity, "5s")}${staminaCell(entity, "1h")}${staminaCell(entity, "1d")}</span></div>`;
+            const name = player.name || `User ${player.userId}`;
+            return `<div class="intel-drop-item"><span class="intel-drop-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span><span class="intel-drop-value">${player.drop}</span><span class="intel-drop-mode${player.alive ? "" : " passive"}">${mode}</span><button type="button" class="intel-drop-teleport" data-teleport-name="${escapeHtml(name)}" title="传送到 ${escapeHtml(name)}">传送</button><span class="intel-stamina${low ? " warn" : ""}">${staminaCell(entity, "5s")}${staminaCell(entity, "1h")}${staminaCell(entity, "1d")}</span></div>`;
           }).join("") : '<div class="intel-drop-item"><span class="intel-drop-name">暂无实体数据</span></div>');
+        dropList.querySelectorAll("button[data-teleport-name]").forEach(button => {
+          button.addEventListener("click", event => {
+            event.preventDefault();
+            event.stopPropagation();
+            teleportToPlayer(button.getAttribute("data-teleport-name"));
+          });
+        });
       }
 
       function refreshDropList() {
         try {
-          updateDropList(buildPlayers(viewParams()));
+          updateDropList(buildPlayers(viewParams()), true);
         } catch (_) {}
+      }
+
+      function teleportToPlayer(name) {
+        const originalInput = document.getElementById("teleportInput");
+        const originalButton = document.getElementById("teleportBtn");
+        if (!name || !originalInput || !originalButton) {
+          if (dropList) dropList.title = "未找到网页原生传送控件";
+          return;
+        }
+        const valueSetter = Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          "value"
+        )?.set;
+        if (valueSetter) valueSetter.call(originalInput, name);
+        else originalInput.value = name;
+        originalInput.dispatchEvent(new Event("input", { bubbles: true }));
+        originalInput.dispatchEvent(new Event("change", { bubbles: true }));
+        if (dropList) dropList.title = `正在传送到 ${name}`;
+        window.setTimeout(() => {
+          originalButton.click();
+          if (dropList) dropList.title = `已请求传送到 ${name}`;
+        }, 800);
       }
 
       // 存活判定：与游戏 drawEntity 完全一致——dead = life === 'Dead' || hp <= 0。
@@ -1644,7 +1694,6 @@
       if (dropListRefreshBtn) {
         dropListRefreshBtn.addEventListener("click", refreshDropList);
       }
-
       overlay.setEnabled = setEnabled;
       overlay.destroy = destroy;
 
