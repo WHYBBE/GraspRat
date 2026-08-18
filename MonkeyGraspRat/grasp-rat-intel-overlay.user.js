@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grasp Rat Intel Overlay
 // @namespace    https://grasp-rat-game.h-e.top/
-// @version      0.18.0
+// @version      0.22.0
 // @description  纯信息层：合并全场实时/快照/小地图数据标记场上玩家，富敌高亮，Active=实线+名+残血HP，Passive=虚线(drop≥20标名)，原生面板按绘制签名直接不绘制，不做任何自动操作。
 // @match        https://grasp-rat-game.h-e.top/*
 // @run-at       document-end
@@ -151,8 +151,11 @@
       panel.id = PANEL_ID;
       panel.innerHTML = [
         '<div class="intel-legend" data-intel="legend"></div>',
+        '<div class="intel-drop-list" data-intel="drop-list"></div>',
         '<div class="intel-row">',
         '<button type="button" data-intel="legend-toggle" title="图例">图例</button>',
+        '<button type="button" data-intel="drop-list-toggle" title="Drop列表">Drop列表</button>',
+        '<button type="button" data-intel="drop-list-refresh" title="刷新列表">刷新</button>',
         '<button type="button" data-intel="toggle">情报层 ON</button>',
         '</div>'
       ].join("");
@@ -214,6 +217,100 @@
         }
         #${PANEL_ID}.legend-open .intel-legend { display: grid; }
         #${PANEL_ID}.off .intel-legend { display: none !important; }
+        #${PANEL_ID} .intel-drop-list {
+          display: none;
+          width: min(430px, calc(100vw - 24px));
+          max-height: min(440px, 55vh);
+          overflow: auto;
+          padding: 6px;
+          background: rgba(2, 6, 23, .9);
+          border: 1px solid rgba(125, 211, 252, .24);
+          border-radius: 4px;
+          pointer-events: auto;
+        }
+        #${PANEL_ID}.drop-list-open .intel-drop-list { display: block; }
+        #${PANEL_ID}.off .intel-drop-list { display: none !important; }
+        #${PANEL_ID} .intel-drop-head {
+          display: flex;
+          justify-content: space-between;
+          padding: 2px 6px 5px;
+          color: rgba(186, 230, 253, .82);
+          font-size: 10px;
+          border-bottom: 1px solid rgba(148, 163, 184, .18);
+        }
+        #${PANEL_ID} .intel-drop-item {
+          display: grid;
+          grid-template-columns: minmax(120px, 1fr) 76px 78px;
+          grid-template-rows: auto auto;
+          column-gap: 8px;
+          align-items: center;
+          padding: 8px 7px 9px;
+          color: rgba(226, 232, 240, .9);
+          border-bottom: 1px solid rgba(148, 163, 184, .09);
+          font-size: 11px;
+          text-align: right;
+        }
+        #${PANEL_ID} .intel-drop-item:last-child { border-bottom: 0; }
+        #${PANEL_ID} .intel-drop-name {
+          overflow: hidden;
+          color: rgba(241, 245, 249, .94);
+          font-size: 13px;
+          font-weight: 600;
+          text-align: left;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        #${PANEL_ID} .intel-drop-value {
+          color: rgba(248, 250, 252, .98);
+          font-size: 17px;
+          font-weight: 800;
+        }
+        #${PANEL_ID} .intel-drop-mode {
+          justify-self: end;
+          padding: 3px 7px;
+          color: rgba(167, 243, 208, .98);
+          background: rgba(22, 101, 75, .3);
+          border: 1px solid rgba(110, 231, 183, .32);
+          border-radius: 10px;
+          font-size: 10px;
+          font-weight: 700;
+        }
+        #${PANEL_ID} .intel-drop-mode.passive {
+          color: rgba(203, 213, 225, .88);
+          background: rgba(71, 85, 105, .28);
+          border-color: rgba(148, 163, 184, .28);
+        }
+        #${PANEL_ID} .intel-stamina {
+          grid-column: 1 / -1;
+          display: grid;
+          grid-template-columns: repeat(3, 1fr);
+          gap: 4px;
+          margin-top: 7px;
+          color: rgba(125, 211, 252, .82);
+          font-size: 10px;
+          text-align: center;
+        }
+        #${PANEL_ID} .intel-stamina span {
+          position: relative;
+          overflow: hidden;
+          padding: 4px 3px;
+          background: rgba(30, 41, 59, .72);
+          border-radius: 3px;
+          white-space: nowrap;
+        }
+        #${PANEL_ID} .intel-stamina-bar {
+          position: absolute;
+          left: 0;
+          top: 0;
+          bottom: 0;
+          background: rgba(56, 189, 248, .24);
+          pointer-events: none;
+        }
+        #${PANEL_ID} .intel-stamina-label {
+          position: relative;
+          z-index: 1;
+        }
+        #${PANEL_ID} .intel-stamina.warn { color: rgba(253, 186, 116, .95); }
         #${PANEL_ID} .intel-legend-row {
           display: flex;
           align-items: center;
@@ -248,7 +345,10 @@
       let drawCtx = ctx;
       const toggleBtn = panel.querySelector('[data-intel="toggle"]');
       const legendToggleBtn = panel.querySelector('[data-intel="legend-toggle"]');
+      const dropListToggleBtn = panel.querySelector('[data-intel="drop-list-toggle"]');
+      const dropListRefreshBtn = panel.querySelector('[data-intel="drop-list-refresh"]');
       const legend = panel.querySelector('[data-intel="legend"]');
+      const dropList = panel.querySelector('[data-intel="drop-list"]');
 
       // 图例默认折叠。
       legend.innerHTML = DROP_TIERS
@@ -288,6 +388,52 @@
       function enemyDrop(entity) {
         const value = Number(entity.death_reward_preview ?? entity.death_drop_coins ?? 0);
         return Number.isFinite(value) ? value : 0;
+      }
+
+      function escapeHtml(value) {
+        return String(value == null ? "" : value).replace(/[&<>"']/g, char => ({
+          "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"
+        }[char]));
+      }
+
+      function staminaText(entity, key) {
+        if (!entity) return "--";
+        const value = Number(entity[`stamina_${key}_remaining_milli`]);
+        const limit = Number(entity[`stamina_${key}_limit_milli`]);
+        if (!Number.isFinite(value) || !Number.isFinite(limit)) return "--";
+        return `${Math.floor(value / 1000)}/${Math.floor(limit / 1000)}`;
+      }
+
+      function staminaCell(entity, key) {
+        const value = Number(entity && entity[`stamina_${key}_remaining_milli`]);
+        const limit = Number(entity && entity[`stamina_${key}_limit_milli`]);
+        if (!Number.isFinite(value) || !Number.isFinite(limit) || limit <= 0) {
+          return `<span><i class="intel-stamina-bar" style="width:0%"></i><b class="intel-stamina-label">${key} --</b></span>`;
+        }
+        const ratio = Math.max(0, Math.min(1, value / limit));
+        return `<span><i class="intel-stamina-bar" style="width:${(ratio * 100).toFixed(1)}%"></i><b class="intel-stamina-label">${key} ${Math.floor(value / 1000)}/${Math.floor(limit / 1000)}</b></span>`;
+      }
+
+      function updateDropList(players) {
+        if (!dropList) return;
+        const rows = players
+          .filter(player => player.entity)
+          .sort((a, b) => b.drop - a.drop || String(a.name).localeCompare(String(b.name)))
+          .slice(0, 100);
+        dropList.innerHTML = '<div class="intel-drop-head"><span>用户</span><span>Drop</span><span>状态</span></div>'
+          + (rows.length ? rows.map(player => {
+            const entity = player.entity;
+            const stamina = [staminaText(entity, "5s"), staminaText(entity, "1h"), staminaText(entity, "1d")];
+            const low = stamina.some(value => value !== "--" && /^0\//.test(value));
+            const mode = player.alive ? "Active" : "Passive";
+            return `<div class="intel-drop-item"><span class="intel-drop-name" title="${escapeHtml(player.name || player.userId)}">${escapeHtml(player.name || `User ${player.userId}`)}</span><span class="intel-drop-value">${player.drop}</span><span class="intel-drop-mode${player.alive ? "" : " passive"}">${mode}</span><span class="intel-stamina${low ? " warn" : ""}">${staminaCell(entity, "5s")}${staminaCell(entity, "1h")}${staminaCell(entity, "1d")}</span></div>`;
+          }).join("") : '<div class="intel-drop-item"><span class="intel-drop-name">暂无实体数据</span></div>');
+      }
+
+      function refreshDropList() {
+        try {
+          updateDropList(buildPlayers(viewParams()));
+        } catch (_) {}
       }
 
       // 存活判定：与游戏 drawEntity 完全一致——dead = life === 'Dead' || hp <= 0。
@@ -1341,6 +1487,7 @@
 
         const now = Date.now();
         const players = buildPlayers(view);
+        updateDropList(players);
         trackMotion(players, now);
         const pulse = 0.5 + 0.5 * Math.sin(now / 600);
         const policy = labelPolicy(view);
@@ -1457,7 +1604,9 @@
           overlay.suppressActive = false;
           overlay.panelRects = [];
           panel.classList.remove("legend-open");
+          panel.classList.remove("drop-list-open");
           if (legendToggleBtn) legendToggleBtn.textContent = "图例";
+          if (dropListToggleBtn) dropListToggleBtn.textContent = "Drop列表";
           clearCanvas();
         } else {
           hookGameCanvas();
@@ -1483,6 +1632,17 @@
           panel.classList.toggle("legend-open");
           legendToggleBtn.textContent = panel.classList.contains("legend-open") ? "收起" : "图例";
         });
+      }
+      if (dropListToggleBtn) {
+        dropListToggleBtn.addEventListener("click", () => {
+          const opened = !panel.classList.contains("drop-list-open");
+          panel.classList.toggle("drop-list-open", opened);
+          dropListToggleBtn.textContent = opened ? "收起列表" : "Drop列表";
+          if (opened) refreshDropList();
+        });
+      }
+      if (dropListRefreshBtn) {
+        dropListRefreshBtn.addEventListener("click", refreshDropList);
       }
 
       overlay.setEnabled = setEnabled;
