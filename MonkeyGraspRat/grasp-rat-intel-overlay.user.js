@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grasp Rat Intel Overlay
 // @namespace    https://grasp-rat-game.h-e.top/
-// @version      0.12.2
+// @version      0.14.3
 // @description  纯信息层：合并全场实时/快照/小地图数据标记场上玩家，富敌高亮，Active=实线+名+残血HP，Passive=虚线(drop≥20标名)，原生面板按绘制签名直接不绘制，不做任何自动操作。
 // @match        https://grasp-rat-game.h-e.top/*
 // @run-at       document-end
@@ -82,12 +82,12 @@
     // 金币颜色档位：<3 / 3-20 / 20-50 / 50-100 / 100-500 / 500-2000 / 2000+。
     const DROP_TIERS = [
       { min: 2000, radius: 30, color: "255, 255, 255", label: "≥2000" }, // 白光
-      { min: 500, radius: 25, color: "239, 68, 68", label: "500-2000" },  // 红
-      { min: 100, radius: 20, color: "225, 29, 72", label: "100-500" },   // 玫红
-      { min: 50, radius: 14, color: "192, 38, 211", label: "50-100" },    // 品红
-      { min: 20, radius: 11, color: "124, 58, 237", label: "20-50" },      // 紫
-      { min: 3, radius: 8, color: "180, 120, 72", label: "3-20" },         // 低对比暖铜
-      { min: 0, radius: 7, color: "148, 163, 184", label: "<3" }            // 灰
+      { min: 500, radius: 25, color: "224, 115, 105", label: "500-2000" }, // 珊瑚红
+      { min: 100, radius: 20, color: "215, 125, 165", label: "100-500" },  // 粉玫红
+      { min: 50, radius: 14, color: "176, 137, 211", label: "50-100" },    // 薰衣草紫
+      { min: 20, radius: 11, color: "112, 157, 207", label: "20-50" },     // 清透蓝紫
+      { min: 3, radius: 8, color: "232, 160, 105", label: "3-20" },         // 柔和杏橙
+      { min: 0, radius: 6, color: "51, 65, 85", label: "<3" }                // 暗灰
     ];
 
     // 金币数字标注阈值：>=3 起标数字（与 >=3 特殊色一致）。
@@ -573,6 +573,19 @@
         return false;
       }
 
+      // 游戏原生存活实体使用 #34d399；压暗这组颜色，把视觉焦点留给活跃高亮。
+      function mutedNativeGreen(style) {
+        const raw = String(style == null ? "" : style).toLowerCase();
+        if (!raw.includes("52, 211, 153") && !raw.includes("#34d399")) return null;
+        const match = raw.match(/rgba?\(\s*52\s*,\s*211\s*,\s*153(?:\s*,\s*([\d.]+))?\s*\)/);
+        const hexMatch = raw.match(/#34d399([\da-f]{2})?/i);
+        if (!match && !hexMatch) return null;
+        const alpha = match
+          ? (Number.isFinite(Number(match[1])) ? Number(match[1]) * 0.85 : 0.85)
+          : (hexMatch[1] ? parseInt(hexMatch[1], 16) / 255 * 0.85 : 0.85);
+        return `rgba(45, 178, 132, ${Math.max(0.12, alpha)})`;
+      }
+
       function isPanelText(text) {
         if (typeof text !== "string") return false;
         if (/^(HP |Drop |STA |INV |Loss |User )/i.test(text)) return true;
@@ -624,7 +637,9 @@
         const orig = {
           fillText: gctx.fillText,
           strokeText: gctx.strokeText,
-          fillRect: gctx.fillRect
+          fillRect: gctx.fillRect,
+          fill: gctx.fill,
+          stroke: gctx.stroke
         };
 
         const shouldSkipText = function (text, x, y, font) {
@@ -650,6 +665,26 @@
         gctx.strokeText = function (text, x, y, maxWidth) {
           if (shouldSkipText(text, x, y, this.font)) return;
           return orig.strokeText.call(this, text, x, y, maxWidth);
+        };
+        gctx.fill = function (fillRule) {
+          const original = this.fillStyle;
+          const muted = mutedNativeGreen(original);
+          if (muted) this.fillStyle = muted;
+          try {
+            return orig.fill.call(this, fillRule);
+          } finally {
+            if (muted) this.fillStyle = original;
+          }
+        };
+        gctx.stroke = function () {
+          const original = this.strokeStyle;
+          const muted = mutedNativeGreen(original);
+          if (muted) this.strokeStyle = muted;
+          try {
+            return orig.stroke.call(this);
+          } finally {
+            if (muted) this.strokeStyle = original;
+          }
         };
         gctx.fillRect = function (x, y, w, h) {
           if (!overlay.enabled || overlay.paintingIntel) return orig.fillRect.call(this, x, y, w, h);
@@ -685,6 +720,8 @@
             gctx.fillText = orig.fillText;
             gctx.strokeText = orig.strokeText;
             gctx.fillRect = orig.fillRect;
+            gctx.fill = orig.fill;
+            gctx.stroke = orig.stroke;
             delete gctx.__intelHooked;
           } catch (_) {}
         }
@@ -778,6 +815,7 @@
         const emphasis = drop >= EMPHASIS_DROP && alive;
         const legendary = drop >= 2000 && alive;
         const subdued = drop < 20;
+        const negligible = drop < 3;
         const stack = labelStack || 0;
         const labelLift = stack * LABEL_STACK_STEP;
         const isAlive = alive !== false;
@@ -785,21 +823,35 @@
         drawCtx.save();
         drawCtx.translate(point.x, point.y);
 
+        if (isAlive) {
+          // 存活目标用浅色轮廓从压暗的原生实体中提出来，移动目标再加强一层呼吸光。
+          drawCtx.beginPath();
+          drawCtx.arc(0, 0, baseRadius + (active ? 5 : 3), 0, Math.PI * 2);
+          drawCtx.lineWidth = active ? 2.2 : 1.2;
+          drawCtx.strokeStyle = active
+            ? `rgba(240, 253, 250, ${0.72 + pulse * 0.2})`
+            : "rgba(226, 232, 240, .42)";
+          drawCtx.shadowBlur = active ? 8 + pulse * 8 : 0;
+          drawCtx.shadowColor = active ? "rgba(240, 253, 250, .8)" : "transparent";
+          drawCtx.stroke();
+          drawCtx.shadowBlur = 0;
+        }
+
         if (!isAlive) {
           // Passive：虚线圈 + 淡填充，与 Active 实线圈区分。
           drawCtx.beginPath();
           drawCtx.arc(0, 0, baseRadius, 0, Math.PI * 2);
-          drawCtx.fillStyle = `rgba(${color}, .06)`;
+           drawCtx.fillStyle = `rgba(${color}, ${negligible ? 0.025 : 0.06})`;
           drawCtx.fill();
           drawCtx.lineWidth = 2;
           drawCtx.setLineDash([4, 3]);
-          drawCtx.strokeStyle = `rgba(${color}, .55)`;
+           drawCtx.strokeStyle = `rgba(${color}, ${negligible ? 0.22 : 0.55})`;
           drawCtx.shadowBlur = 0;
           drawCtx.stroke();
           drawCtx.setLineDash([]);
           drawCtx.beginPath();
           drawCtx.arc(0, 0, Math.max(1.2, baseRadius * 0.22), 0, Math.PI * 2);
-          drawCtx.fillStyle = `rgba(${color}, .45)`;
+           drawCtx.fillStyle = `rgba(${color}, ${negligible ? 0.16 : 0.45})`;
           drawCtx.fill();
         } else if (active) {
           // Active 且在动：呼吸环 + 实心圈。
@@ -808,7 +860,7 @@
           drawCtx.arc(0, 0, baseRadius + 4 + expand * (emphasis ? 22 : 14), 0, Math.PI * 2);
           drawCtx.lineWidth = emphasis ? 2.4 : 1.8;
           drawCtx.setLineDash([]);
-          drawCtx.strokeStyle = `rgba(${color}, ${(1 - expand) * (emphasis ? 0.6 : (subdued ? 0.2 : 0.45))})`;
+           drawCtx.strokeStyle = `rgba(${color}, ${(1 - expand) * (emphasis ? 0.6 : (negligible ? 0.08 : (subdued ? 0.2 : 0.45)))})`;
           drawCtx.shadowBlur = 0;
           drawCtx.stroke();
 
@@ -817,12 +869,12 @@
 
           drawCtx.beginPath();
           drawCtx.arc(0, 0, baseRadius, 0, Math.PI * 2);
-          drawCtx.fillStyle = `rgba(${color}, ${(emphasis ? 0.28 : 0.2) + pulse * 0.12})`;
+           drawCtx.fillStyle = `rgba(${color}, ${negligible ? 0.025 : (emphasis ? 0.28 : 0.2) + pulse * 0.12})`;
           drawCtx.fill();
 
           drawCtx.lineWidth = legendary ? 4.2 : (emphasis ? 3.4 : (subdued ? 1.8 : 2.8));
           drawCtx.setLineDash([]);
-          drawCtx.strokeStyle = `rgba(${color}, ${subdued ? 0.55 : ringAlpha})`;
+           drawCtx.strokeStyle = `rgba(${color}, ${negligible ? 0.25 : (subdued ? 0.55 : ringAlpha)})`;
           drawCtx.shadowBlur = legendary ? 22 + pulse * 14 : glow;
           drawCtx.shadowColor = legendary
             ? `rgba(255, 255, 255, ${0.8 + pulse * 0.2})`
@@ -843,16 +895,16 @@
           // Active 静止：实心稳定环（非虚线）+ 中心点。
           drawCtx.beginPath();
           drawCtx.arc(0, 0, baseRadius, 0, Math.PI * 2);
-          drawCtx.fillStyle = `rgba(${color}, .1)`;
+           drawCtx.fillStyle = `rgba(${color}, ${negligible ? 0.03 : 0.1})`;
           drawCtx.fill();
           drawCtx.lineWidth = 2;
           drawCtx.setLineDash([]);
-          drawCtx.strokeStyle = `rgba(${color}, .78)`;
+           drawCtx.strokeStyle = `rgba(${color}, ${negligible ? 0.3 : 0.78})`;
           drawCtx.shadowBlur = 0;
           drawCtx.stroke();
           drawCtx.beginPath();
           drawCtx.arc(0, 0, Math.max(1.6, baseRadius * 0.28), 0, Math.PI * 2);
-          drawCtx.fillStyle = `rgba(${color}, .9)`;
+           drawCtx.fillStyle = `rgba(${color}, ${negligible ? 0.25 : 0.9})`;
           drawCtx.fill();
         }
 
