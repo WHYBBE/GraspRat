@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grasp Rat Intel Overlay
 // @namespace    https://grasp-rat-game.h-e.top/
-// @version      0.7.3
+// @version      0.12.2
 // @description  纯信息层：合并全场实时/快照/小地图数据标记场上玩家，富敌高亮，Active=实线+名+残血HP，Passive=虚线(drop≥20标名)，原生面板按绘制签名直接不绘制，不做任何自动操作。
 // @match        https://grasp-rat-game.h-e.top/*
 // @run-at       document-end
@@ -66,8 +66,7 @@
     // 近距标签防重叠：屏幕距离小于此值时纵向错开名字/掉落标注。
     const LABEL_STACK_DIST = 42;
     const LABEL_STACK_STEP = 10;
-    // 默认视野 100m 时 scale=1；放大视野（缩小地图）后数字会挤爆，按 scale 做 LOD。
-    // DEFAULT_VIEW_RADIUS_CM = 10000 → scale = viewRadiusCm / 10000。
+    // 游戏默认视野 100m 时 scale=1；scale = viewRadiusCm / 10000。
 
     // 隐藏原生面板：按“绘制签名”识别，而不是复刻坐标。
     // 游戏 drawEntity 每个面板都先用唯一底色画背景框，再用等宽字体画各行文字：
@@ -80,19 +79,19 @@
     // 文字命中面板矩形时的容差（等宽字体量宽和端上细微差异）。
     const PANEL_HIT_PAD = 10;
 
-    // 金币档位阈值，按 log 递增：5 / 10 / 20 / 50 / 100 / 200。
+    // 金币颜色档位：<3 / 3-20 / 20-50 / 50-100 / 100-500 / 500-2000 / 2000+。
     const DROP_TIERS = [
-      { min: 200, radius: 30, color: "232, 121, 249", label: "≥200" }, // 品红
-      { min: 100, radius: 25, color: "248, 113, 113", label: "≥100" }, // 红
-      { min: 50, radius: 20, color: "251, 146, 60", label: "≥50" },    // 橙
-      { min: 20, radius: 14, color: "250, 204, 21", label: "≥20" },    // 黄
-      { min: 10, radius: 11, color: "74, 222, 128", label: "≥10" },    // 绿
-      { min: 5, radius: 9, color: "45, 212, 191", label: "≥5" },       // 青（>=5 特殊色）
-      { min: 0, radius: 7, color: "148, 163, 184", label: "<5" }       // 灰
+      { min: 2000, radius: 30, color: "255, 255, 255", label: "≥2000" }, // 白光
+      { min: 500, radius: 25, color: "239, 68, 68", label: "500-2000" },  // 红
+      { min: 100, radius: 20, color: "225, 29, 72", label: "100-500" },   // 玫红
+      { min: 50, radius: 14, color: "192, 38, 211", label: "50-100" },    // 品红
+      { min: 20, radius: 11, color: "124, 58, 237", label: "20-50" },      // 紫
+      { min: 3, radius: 8, color: "180, 120, 72", label: "3-20" },         // 低对比暖铜
+      { min: 0, radius: 7, color: "148, 163, 184", label: "<3" }            // 灰
     ];
 
-    // 金币数字标注阈值：>=5 起标数字（与 >=5 特殊色一致）。
-    const LABEL_MIN_DROP = 5;
+    // 金币数字标注阈值：>=3 起标数字（与 >=3 特殊色一致）。
+    const LABEL_MIN_DROP = 3;
     // Passive 仅 drop≥此值才显示名字（低价值 Passive 不刷名）。
     const DEAD_NAME_MIN_DROP = 20;
     // 玩家名字最长显示字符数，超出截断，避免遮挡。
@@ -477,24 +476,24 @@
         return DROP_TIERS[DROP_TIERS.length - 1];
       }
 
-      // 缩放只调“密度”（去重间距/边缘数量/标记大小），不提高 drop 阈值。
-      // 远景仍显示 ≥5 的数字；过密时由屏幕去重保留高 drop。
+      // 以游戏实际可视半径判断：1.5km 及更近显示低价值数字，超过 1.5km 隐藏。
       function labelPolicy(view) {
         const scale = Math.max(0.1, Number(view && view.scale) || 1);
+        const minDrop = scale <= 15 ? LABEL_MIN_DROP : 20;
         // scale≈1: 100m；≈5: 500m；≈10: 1km；≈50+: 5km+
         if (scale <= 2) {
-          return { minDrop: LABEL_MIN_DROP, minLabelPx: 28, edgeMin: LABEL_MIN_DROP, edgeMax: 16, markerScale: 1 };
+          return { minDrop, minLabelPx: 28, edgeMin: minDrop, edgeMax: 16, markerScale: 1 };
         }
         if (scale <= 6) {
-          return { minDrop: LABEL_MIN_DROP, minLabelPx: 32, edgeMin: LABEL_MIN_DROP, edgeMax: 14, markerScale: 0.95 };
+          return { minDrop, minLabelPx: 32, edgeMin: minDrop, edgeMax: 14, markerScale: 0.95 };
         }
         if (scale <= 15) {
-          return { minDrop: LABEL_MIN_DROP, minLabelPx: 36, edgeMin: LABEL_MIN_DROP, edgeMax: 12, markerScale: 0.85 };
+          return { minDrop, minLabelPx: 36, edgeMin: minDrop, edgeMax: 12, markerScale: 0.85 };
         }
         if (scale <= 40) {
-          return { minDrop: LABEL_MIN_DROP, minLabelPx: 40, edgeMin: LABEL_MIN_DROP, edgeMax: 12, markerScale: 0.75 };
+          return { minDrop, minLabelPx: 40, edgeMin: minDrop, edgeMax: 12, markerScale: 0.75 };
         }
-        return { minDrop: LABEL_MIN_DROP, minLabelPx: 44, edgeMin: LABEL_MIN_DROP, edgeMax: 12, markerScale: 0.65 };
+        return { minDrop, minLabelPx: 44, edgeMin: minDrop, edgeMax: 12, markerScale: 0.65 };
       }
 
       // 屏幕空间贪心：高 drop / 活跃优先，近距离只留一个数字（远景仍参与标注）。
@@ -777,6 +776,8 @@
         const ms = Number.isFinite(markerScale) ? markerScale : 1;
         const baseRadius = Math.max(4, tier.radius * ms);
         const emphasis = drop >= EMPHASIS_DROP && alive;
+        const legendary = drop >= 2000 && alive;
+        const subdued = drop < 20;
         const stack = labelStack || 0;
         const labelLift = stack * LABEL_STACK_STEP;
         const isAlive = alive !== false;
@@ -807,11 +808,11 @@
           drawCtx.arc(0, 0, baseRadius + 4 + expand * (emphasis ? 22 : 14), 0, Math.PI * 2);
           drawCtx.lineWidth = emphasis ? 2.4 : 1.8;
           drawCtx.setLineDash([]);
-          drawCtx.strokeStyle = `rgba(${color}, ${(1 - expand) * (emphasis ? 0.6 : 0.45)})`;
+          drawCtx.strokeStyle = `rgba(${color}, ${(1 - expand) * (emphasis ? 0.6 : (subdued ? 0.2 : 0.45))})`;
           drawCtx.shadowBlur = 0;
           drawCtx.stroke();
 
-          const glow = (emphasis ? 14 : 10) + pulse * (emphasis ? 16 : 12);
+          const glow = subdued ? 0 : (emphasis ? 14 : 10) + pulse * (emphasis ? 16 : 12);
           const ringAlpha = 0.9 + pulse * 0.1;
 
           drawCtx.beginPath();
@@ -819,12 +820,25 @@
           drawCtx.fillStyle = `rgba(${color}, ${(emphasis ? 0.28 : 0.2) + pulse * 0.12})`;
           drawCtx.fill();
 
-          drawCtx.lineWidth = emphasis ? 3.4 : 2.8;
+          drawCtx.lineWidth = legendary ? 4.2 : (emphasis ? 3.4 : (subdued ? 1.8 : 2.8));
           drawCtx.setLineDash([]);
-          drawCtx.strokeStyle = `rgba(${color}, ${ringAlpha})`;
-          drawCtx.shadowBlur = glow;
-          drawCtx.shadowColor = `rgba(${color}, .9)`;
+          drawCtx.strokeStyle = `rgba(${color}, ${subdued ? 0.55 : ringAlpha})`;
+          drawCtx.shadowBlur = legendary ? 22 + pulse * 14 : glow;
+          drawCtx.shadowColor = legendary
+            ? `rgba(255, 255, 255, ${0.8 + pulse * 0.2})`
+            : `rgba(${color}, .9)`;
           drawCtx.stroke();
+
+          if (legendary) {
+            // 最高档叠加一圈细闪光，保持白色标记在复杂场景中醒目。
+            drawCtx.beginPath();
+            drawCtx.arc(0, 0, baseRadius + 7 + pulse * 3, 0, Math.PI * 2);
+            drawCtx.lineWidth = 1.2;
+            drawCtx.strokeStyle = `rgba(255, 255, 255, ${0.45 + pulse * 0.35})`;
+            drawCtx.shadowBlur = 12;
+            drawCtx.shadowColor = "rgba(255, 255, 255, .9)";
+            drawCtx.stroke();
+          }
         } else {
           // Active 静止：实心稳定环（非虚线）+ 中心点。
           drawCtx.beginPath();
@@ -986,45 +1000,41 @@
         drawCtx.restore();
       }
 
-      // 金币数字。富敌活跃时加金币片背景，进一步突出。
+      // 金币数字统一使用深色底和白字，避免被地图网格和实体颜色吞掉。
       function drawDropLabel(x, y, drop, color, active, emphasis) {
         const text = String(drop);
+        const subdued = drop < 20;
         drawCtx.setLineDash([]);
         drawCtx.textAlign = "center";
         drawCtx.textBaseline = "bottom";
-        const fontSize = emphasis ? (active ? 17 : 14) : (active ? 15 : 13);
-        const weight = active ? 700 : 500;
+        const legendary = drop >= 2000;
+        const fontSize = legendary ? (active ? 18 : 16) : (emphasis ? (active ? 17 : 15) : (active ? 15 : 13));
+        const weight = active ? 700 : 600;
         drawCtx.font = `${weight} ${fontSize}px "Microsoft YaHei", Arial, sans-serif`;
 
-        if (emphasis && active) {
-          const w = drawCtx.measureText(text).width;
-          const padX = 6;
-          const chipW = w + padX * 2;
-          const chipH = fontSize + 6;
-          const chipX = x - chipW / 2;
-          const chipY = y - chipH;
-          drawCtx.shadowBlur = 8;
-          drawCtx.shadowColor = `rgba(${color}, .8)`;
-          roundRect(chipX, chipY, chipW, chipH, 4);
-          drawCtx.fillStyle = "rgba(2, 6, 23, .82)";
-          drawCtx.fill();
-          drawCtx.lineWidth = 1.4;
-          drawCtx.strokeStyle = `rgba(${color}, .95)`;
-          drawCtx.shadowBlur = 0;
-          drawCtx.stroke();
-          drawCtx.fillStyle = `rgba(${color}, 1)`;
-          drawCtx.fillText(text, x, y - 3);
-          return;
-        }
+        const w = drawCtx.measureText(text).width;
+        const padX = legendary || emphasis ? 7 : 5;
+        const chipW = w + padX * 2;
+        const chipH = fontSize + (emphasis ? 8 : 6);
+        const chipX = x - chipW / 2;
+        const chipY = y - chipH;
+        roundRect(chipX, chipY, chipW, chipH, 4);
+        drawCtx.fillStyle = active
+          ? `rgba(2, 6, 23, ${subdued ? 0.78 : 0.94})`
+          : `rgba(2, 6, 23, ${subdued ? 0.62 : 0.78})`;
+        drawCtx.fill();
+        drawCtx.lineWidth = legendary ? 2.5 : (emphasis ? 2 : (subdued ? 1 : 1.5));
+        drawCtx.strokeStyle = `rgba(${color}, ${legendary ? 1 : (subdued ? 0.55 : (active ? 1 : 0.8))})`;
+        drawCtx.shadowBlur = legendary ? 14 : (emphasis && active ? 8 : 0);
+        drawCtx.shadowColor = legendary ? "rgba(255, 255, 255, .95)" : `rgba(${color}, .85)`;
+        drawCtx.stroke();
+        drawCtx.shadowBlur = 0;
 
-        const labelAlpha = active ? 0.98 : 0.42;
-        drawCtx.shadowBlur = active ? 6 : 0;
-        drawCtx.shadowColor = "rgba(2, 6, 23, .9)";
         drawCtx.lineWidth = 3;
-        drawCtx.strokeStyle = "rgba(2, 6, 23, .85)";
-        drawCtx.strokeText(text, x, y);
-        drawCtx.fillStyle = `rgba(${color}, ${labelAlpha})`;
-        drawCtx.fillText(text, x, y);
+        drawCtx.strokeStyle = "rgba(2, 6, 23, .95)";
+        drawCtx.strokeText(text, x, y - (emphasis ? 3 : 2));
+        drawCtx.fillStyle = subdued ? "rgba(226, 232, 240, .78)" : "rgba(248, 250, 252, 1)";
+        drawCtx.fillText(text, x, y - (emphasis ? 3 : 2));
       }
 
       function roundRect(x, y, w, h, r) {
@@ -1039,7 +1049,7 @@
       }
 
       // 视野外玩家：贴到屏幕边缘，用朝外三角 + Drop 数字提示方位。
-      function drawEdgeMarker(point, tier, drop, active, pulse, surface, now) {
+      function drawEdgeMarker(point, tier, drop, active, pulse, surface, now, showDropLabel) {
         // 以游戏视觉中心为锚（已为左侧栏预留），避免贴边方位偏到整窗中心。
         let cx = surface.width / 2;
         let cy = surface.height / 2;
@@ -1085,7 +1095,9 @@
         // Drop 数字放在三角内侧（朝屏幕中心方向偏移）。
         const labelX = -Math.cos(angle) * (size + 10);
         const labelY = -Math.sin(angle) * (size + 10);
-        drawDropLabel(labelX, labelY + size * 0.5, drop, color, active, emphasis);
+        if (showDropLabel) {
+          drawDropLabel(labelX, labelY + size * 0.5, drop, color, active, emphasis);
+        }
         drawCtx.restore();
       }
 
@@ -1180,14 +1192,14 @@
               labelStack: 0, showDropLabel: false
             });
           } else if (drop >= policy.edgeMin) {
-            offScreen.push({ point, tier, drop, active, alive });
+            offScreen.push({ point, tier, drop, active, alive, showDropLabel: drop >= policy.minDrop });
           }
         }
 
         drawSelfHpBar(surface);
         offScreen.sort((a, b) => b.drop - a.drop);
         for (const marker of offScreen.slice(0, policy.edgeMax)) {
-          drawEdgeMarker(marker.point, marker.tier, marker.drop, marker.active, pulse, surface, now);
+          drawEdgeMarker(marker.point, marker.tier, marker.drop, marker.active, pulse, surface, now, marker.showDropLabel);
         }
         selectLabeled(onScreen, policy);
         // 名字/残血也参与错开（Active 始终有名）
