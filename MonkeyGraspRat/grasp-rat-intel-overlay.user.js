@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grasp Rat Intel Overlay
 // @namespace    https://grasp-rat-game.h-e.top/
-// @version      0.25.4
+// @version      0.25.5
 // @description  纯信息层：合并全场实时/快照/小地图数据标记场上玩家，富敌高亮，Active=实线+名+残血HP，Passive=虚线(drop≥20标名)，原生面板按绘制签名直接不绘制，不做任何自动操作。
 // @match        https://grasp-rat-game.h-e.top/*
 // @run-at       document-end
@@ -1112,7 +1112,7 @@
         }
 
         const invulnerableSecs = invulnerableRemainingSecs(entity);
-        if (invulnerableSecs > 0 && isAlive) {
+        if (invulnerableSecs > 0 && isAliveEntity(entity)) {
           drawInvulnerableLabel(0, hpBottom - 1, invulnerableSecs);
         }
 
@@ -1120,7 +1120,7 @@
         if (showDropLabel && drop >= LABEL_MIN_DROP) {
           drawDropLabel(
             0,
-            hpBottom - 1 - (invulnerableSecs > 0 && isAlive ? 16 : 0),
+            hpBottom - 1 - (invulnerableSecs > 0 && isAliveEntity(entity) ? 16 : 0),
             drop,
             color,
             active && isAlive,
@@ -1143,13 +1143,14 @@
 
       function invulnerableRemainingSecs(entity) {
         if (!entity) return 0;
-        const direct = Number(entity.invulnerable_remaining_secs);
+        const direct = Number(entity.invulnerable_remaining_secs ?? entity.invulnerable_remaining_seconds);
         if (Number.isFinite(direct) && direct > 0) return Math.ceil(direct);
         const ticks = Number(entity.invulnerable_remaining_ticks);
         if (Number.isFinite(ticks) && ticks > 0) return Math.ceil(ticks / 20);
         const untilTick = Number(entity.invulnerable_until_tick);
-        if (Number.isFinite(untilTick) && untilTick > 0) {
-          return Math.ceil(Math.max(0, untilTick - getRenderTick()) / 20);
+        const currentTick = getRenderTick();
+        if (Number.isFinite(untilTick) && untilTick > currentTick) {
+          return Math.ceil((untilTick - currentTick) / 20);
         }
         return 0;
       }
