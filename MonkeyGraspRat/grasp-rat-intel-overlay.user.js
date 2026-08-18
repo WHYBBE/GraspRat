@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grasp Rat Intel Overlay
 // @namespace    https://grasp-rat-game.h-e.top/
-// @version      0.15.2
+// @version      0.17.0
 // @description  纯信息层：合并全场实时/快照/小地图数据标记场上玩家，富敌高亮，Active=实线+名+残血HP，Passive=虚线(drop≥20标名)，原生面板按绘制签名直接不绘制，不做任何自动操作。
 // @match        https://grasp-rat-game.h-e.top/*
 // @run-at       document-end
@@ -1123,8 +1123,7 @@
         drawCtx.closePath();
       }
 
-      // 视野外玩家：贴到屏幕边缘，用朝外三角 + Drop 数字提示方位。
-      function drawEdgeMarker(point, tier, drop, active, alive, pulse, surface, now, showDropLabel) {
+      function edgeMarkerPosition(point, surface) {
         // 以游戏视觉中心为锚（已为左侧栏预留），避免贴边方位偏到整窗中心。
         let cx = surface.width / 2;
         let cy = surface.height / 2;
@@ -1144,6 +1143,61 @@
         const ex = cx + dx * scale;
         const ey = cy + dy * scale;
         const angle = Math.atan2(dy, dx);
+        return { x: ex, y: ey, angle };
+      }
+
+      function edgeLabelPlacement(markers, surface) {
+        const placed = [];
+        const offsets = [0, 1, -1, 2, -2, 3, -3, 4, -4];
+        for (const marker of markers) {
+          const edge = edgeMarkerPosition(marker.point, surface);
+          if (!edge) continue;
+          const textWidth = Math.max(26, String(marker.drop).length * 10 + 12);
+          const halfW = textWidth / 2 + 5;
+          const halfH = 18;
+          const tangentX = -Math.sin(edge.angle);
+          const tangentY = Math.cos(edge.angle);
+          let chosen = { x: 0, y: 0, rect: null };
+          for (const index of offsets) {
+            const distance = index * 24;
+            const labelX = edge.x - Math.cos(edge.angle) * 19 + tangentX * distance;
+            const labelY = edge.y - Math.sin(edge.angle) * 19 + tangentY * distance;
+            const rect = {
+              left: labelX - halfW,
+              right: labelX + halfW,
+              top: labelY - halfH,
+              bottom: labelY + halfH
+            };
+            const inside = rect.left >= 4 && rect.right <= surface.width - 4
+              && rect.top >= 4 && rect.bottom <= surface.height - 4;
+            if (!inside) continue;
+            const collision = placed.some(item =>
+              rect.left < item.right && rect.right > item.left
+              && rect.top < item.bottom && rect.bottom > item.top
+            );
+            if (!collision) {
+              chosen = {
+                x: tangentX * distance,
+                y: tangentY * distance,
+                rect
+              };
+              break;
+            }
+          }
+          if (!chosen.rect) continue;
+          placed.push(chosen.rect);
+          marker.edge = edge;
+          marker.labelOffset = { x: chosen.x, y: chosen.y };
+        }
+      }
+
+      // 视野外玩家：贴到屏幕边缘，用朝外三角 + Drop 数字提示方位。
+      function drawEdgeMarker(point, tier, drop, active, alive, pulse, surface, now, showDropLabel, edge, labelOffset) {
+        const position = edge || edgeMarkerPosition(point, surface);
+        if (!position) return;
+        const ex = position.x;
+        const ey = position.y;
+        const angle = position.angle;
         const color = tier.color;
         const emphasis = drop >= EMPHASIS_DROP;
         const size = emphasis ? 12 : 9;
@@ -1168,9 +1222,21 @@
         drawCtx.restore();
 
         // Drop 数字放在三角内侧（朝屏幕中心方向偏移）。
-        const labelX = -Math.cos(angle) * (size + 10);
-        const labelY = -Math.sin(angle) * (size + 10);
+        const labelX = -Math.cos(angle) * (size + 10) + (labelOffset ? labelOffset.x : 0);
+        const labelY = -Math.sin(angle) * (size + 10) + (labelOffset ? labelOffset.y : 0);
         if (showDropLabel) {
+          // 框被错开时用细线连接箭头根部，明确它仍属于同一个远处目标。
+          if (labelOffset && (labelOffset.x || labelOffset.y)) {
+            drawCtx.save();
+            drawCtx.beginPath();
+            drawCtx.moveTo(-Math.cos(angle) * size * 0.7, -Math.sin(angle) * size * 0.7);
+            drawCtx.lineTo(labelX, labelY - 8);
+            drawCtx.lineWidth = 1;
+            drawCtx.strokeStyle = `rgba(${color}, ${active ? 0.72 : 0.42})`;
+            drawCtx.setLineDash([3, 3]);
+            drawCtx.stroke();
+            drawCtx.restore();
+          }
           drawDropLabel(labelX, labelY + size * 0.5, drop, color, active, emphasis, alive);
         }
         drawCtx.restore();
@@ -1273,8 +1339,13 @@
 
         drawSelfHpBar(surface);
         offScreen.sort((a, b) => b.drop - a.drop);
-        for (const marker of offScreen.slice(0, policy.edgeMax)) {
-          drawEdgeMarker(marker.point, marker.tier, marker.drop, marker.active, marker.alive, pulse, surface, now, marker.showDropLabel);
+        const edgeMarkers = offScreen.slice(0, policy.edgeMax);
+        edgeLabelPlacement(edgeMarkers, surface);
+        for (const marker of edgeMarkers) {
+          drawEdgeMarker(
+            marker.point, marker.tier, marker.drop, marker.active, marker.alive,
+            pulse, surface, now, marker.showDropLabel, marker.edge, marker.labelOffset
+          );
         }
         selectLabeled(onScreen, policy);
         // 名字/残血也参与错开（Active 始终有名）
