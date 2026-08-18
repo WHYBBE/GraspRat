@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grasp Rat Intel Overlay
 // @namespace    https://grasp-rat-game.h-e.top/
-// @version      0.14.3
+// @version      0.15.2
 // @description  纯信息层：合并全场实时/快照/小地图数据标记场上玩家，富敌高亮，Active=实线+名+残血HP，Passive=虚线(drop≥20标名)，原生面板按绘制签名直接不绘制，不做任何自动操作。
 // @match        https://grasp-rat-game.h-e.top/*
 // @run-at       document-end
@@ -917,7 +917,7 @@
 
         // 金币数字：贴在环上，由 LOD + 屏幕去重决定是否画。
         if (showDropLabel && drop >= LABEL_MIN_DROP) {
-          drawDropLabel(0, hpBottom - 1, drop, color, active && isAlive, emphasis);
+          drawDropLabel(0, hpBottom - 1, drop, color, active && isAlive, emphasis, isAlive);
         }
 
         // Active 始终显示名字；Passive 仅 drop≥20 才标名。
@@ -1053,7 +1053,7 @@
       }
 
       // 金币数字统一使用深色底和白字，避免被地图网格和实体颜色吞掉。
-      function drawDropLabel(x, y, drop, color, active, emphasis) {
+      function drawDropLabel(x, y, drop, color, active, emphasis, alive = true) {
         const text = String(drop);
         const subdued = drop < 20;
         drawCtx.setLineDash([]);
@@ -1081,12 +1081,35 @@
         drawCtx.shadowColor = legendary ? "rgba(255, 255, 255, .95)" : `rgba(${color}, .85)`;
         drawCtx.stroke();
         drawCtx.shadowBlur = 0;
+        drawCtx.setLineDash([]);
 
         drawCtx.lineWidth = 3;
         drawCtx.strokeStyle = "rgba(2, 6, 23, .95)";
         drawCtx.strokeText(text, x, y - (emphasis ? 3 : 2));
         drawCtx.fillStyle = subdued ? "rgba(226, 232, 240, .78)" : "rgba(248, 250, 252, 1)";
         drawCtx.fillText(text, x, y - (emphasis ? 3 : 2));
+
+        // 状态徽标独立保存 canvas 状态，避免影响下一枚标记或游戏原生绘制。
+        drawCtx.save();
+        const statusX = chipX + chipW - 4;
+        const statusY = chipY + 4;
+        drawCtx.lineWidth = 1.6;
+        if (alive) {
+          drawCtx.fillStyle = "rgba(167, 243, 208, .95)";
+          drawCtx.beginPath();
+          drawCtx.arc(statusX, statusY, 2.2, 0, Math.PI * 2);
+          drawCtx.fill();
+        } else {
+          drawCtx.strokeStyle = "rgba(248, 113, 113, .95)";
+          drawCtx.beginPath();
+          drawCtx.moveTo(statusX - 2, statusY - 2);
+          drawCtx.lineTo(statusX + 2, statusY + 2);
+          drawCtx.moveTo(statusX + 2, statusY - 2);
+          drawCtx.lineTo(statusX - 2, statusY + 2);
+          drawCtx.stroke();
+        }
+        drawCtx.restore();
+
       }
 
       function roundRect(x, y, w, h, r) {
@@ -1101,7 +1124,7 @@
       }
 
       // 视野外玩家：贴到屏幕边缘，用朝外三角 + Drop 数字提示方位。
-      function drawEdgeMarker(point, tier, drop, active, pulse, surface, now, showDropLabel) {
+      function drawEdgeMarker(point, tier, drop, active, alive, pulse, surface, now, showDropLabel) {
         // 以游戏视觉中心为锚（已为左侧栏预留），避免贴边方位偏到整窗中心。
         let cx = surface.width / 2;
         let cy = surface.height / 2;
@@ -1148,7 +1171,7 @@
         const labelX = -Math.cos(angle) * (size + 10);
         const labelY = -Math.sin(angle) * (size + 10);
         if (showDropLabel) {
-          drawDropLabel(labelX, labelY + size * 0.5, drop, color, active, emphasis);
+          drawDropLabel(labelX, labelY + size * 0.5, drop, color, active, emphasis, alive);
         }
         drawCtx.restore();
       }
@@ -1251,7 +1274,7 @@
         drawSelfHpBar(surface);
         offScreen.sort((a, b) => b.drop - a.drop);
         for (const marker of offScreen.slice(0, policy.edgeMax)) {
-          drawEdgeMarker(marker.point, marker.tier, marker.drop, marker.active, pulse, surface, now, marker.showDropLabel);
+          drawEdgeMarker(marker.point, marker.tier, marker.drop, marker.active, marker.alive, pulse, surface, now, marker.showDropLabel);
         }
         selectLabeled(onScreen, policy);
         // 名字/残血也参与错开（Active 始终有名）
