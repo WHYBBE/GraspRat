@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grasp Rat Intel Overlay
 // @namespace    https://grasp-rat-game.h-e.top/
-// @version      0.25.5
+// @version      0.26.0
 // @description  纯信息层：合并全场实时/快照/小地图数据标记场上玩家，富敌高亮，Active=实线+名+残血HP，Passive=虚线(drop≥20标名)，原生面板按绘制签名直接不绘制，不做任何自动操作。
 // @match        https://grasp-rat-game.h-e.top/*
 // @run-at       document-end
@@ -92,6 +92,8 @@
 
     // 金币数字标注阈值：>=3 起标数字（与 >=3 特殊色一致）。
     const LABEL_MIN_DROP = 3;
+    // 地面金币：1 不再重复标数；超过此值以金光数字提醒。
+    const GROUND_COIN_EMPHASIS_AMOUNT = 10;
     // Passive 仅 drop≥此值才显示名字（低价值 Passive 不刷名）。
     const DEAD_NAME_MIN_DROP = 20;
     // 玩家名字最长显示字符数，超出截断，避免遮挡。
@@ -796,6 +798,24 @@
         return f.indexOf("11px") !== -1 && f.toLowerCase().indexOf("mono") !== -1;
       }
 
+      // 原生地面金币数字固定画在金币中心右侧。只根据数量和屏幕坐标同时命中才拦截，
+      // 因此不会吞掉玩家 Drop、HP 等恰好为数字的标签。
+      function shouldReplaceGroundCoinText(text, x, y) {
+        const amount = Number(text);
+        if (!Number.isInteger(amount) || amount < 1) return false;
+        if (amount !== 1 && amount <= GROUND_COIN_EMPHASIS_AMOUNT) return false;
+        let view;
+        try { view = viewParams(); } catch (_) { return false; }
+        if (!view) return false;
+        for (const coin of state.coinDrops || []) {
+          if (Number(coin && coin.amount) !== amount) continue;
+          let pos;
+          try { pos = worldToScreen(Number(coin.x), Number(coin.y), view); } catch (_) { continue; }
+          if (Math.abs(Number(x) - (pos.x + 8)) <= 2 && Math.abs(Number(y) - (pos.y + 4)) <= 2) return true;
+        }
+        return false;
+      }
+
       // 文字锚点是否落在已记录的某个面板框内（含容差）。
       function textInPanelRect(x, y) {
         const rects = overlay.panelRects;
@@ -840,6 +860,7 @@
 
         const shouldSkipText = function (text, x, y, font) {
           if (!overlay.enabled || overlay.paintingIntel) return false;
+          if (shouldReplaceGroundCoinText(text, x, y)) return true;
           // 1) 落在已记录面板框内（含名字行）
           if (overlay.panelRects.length && textInPanelRect(x, y)) return true;
           // 2) 面板固定文案
@@ -1290,6 +1311,46 @@
         drawCtx.restore();
       }
 
+      function drawGroundCoinHighlights(view, now) {
+        const pulse = 0.5 + 0.5 * Math.sin(now / 360);
+        for (const coin of state.coinDrops || []) {
+          const amount = Number(coin && coin.amount);
+          if (!Number.isFinite(amount) || amount <= GROUND_COIN_EMPHASIS_AMOUNT) continue;
+          let pos;
+          try { pos = worldToScreen(Number(coin.x), Number(coin.y), view); } catch (_) { continue; }
+          if (!Number.isFinite(pos.x) || !Number.isFinite(pos.y)) continue;
+
+          drawCtx.save();
+          drawCtx.setLineDash([]);
+          // 金币本身沿用原生图标；这里只加一层扩散光和更醒目的数量。
+          drawCtx.beginPath();
+          drawCtx.arc(pos.x, pos.y, 15 + pulse * 7, 0, Math.PI * 2);
+          drawCtx.fillStyle = `rgba(250, 204, 21, ${0.1 + pulse * 0.1})`;
+          drawCtx.fill();
+          drawCtx.beginPath();
+          drawCtx.arc(pos.x, pos.y, 9 + pulse * 2, 0, Math.PI * 2);
+          drawCtx.lineWidth = 1.5;
+          drawCtx.strokeStyle = `rgba(254, 240, 138, ${0.72 + pulse * 0.24})`;
+          drawCtx.shadowBlur = 12 + pulse * 10;
+          drawCtx.shadowColor = "rgba(250, 204, 21, .95)";
+          drawCtx.stroke();
+
+          const text = String(Math.round(amount));
+          drawCtx.font = '800 15px "Microsoft YaHei", Arial, sans-serif';
+          drawCtx.textAlign = "left";
+          drawCtx.textBaseline = "middle";
+          drawCtx.lineWidth = 3.5;
+          drawCtx.strokeStyle = "rgba(69, 26, 3, .96)";
+          drawCtx.shadowBlur = 8;
+          drawCtx.shadowColor = "rgba(250, 204, 21, .9)";
+          drawCtx.strokeText(text, pos.x + 9, pos.y);
+          drawCtx.shadowBlur = 0;
+          drawCtx.fillStyle = "rgba(254, 249, 195, 1)";
+          drawCtx.fillText(text, pos.x + 9, pos.y);
+          drawCtx.restore();
+        }
+      }
+
       // 金币数字统一使用深色底和白字，避免被地图网格和实体颜色吞掉。
       function drawDropLabel(x, y, drop, color, active, emphasis, alive = true) {
         const text = String(drop);
@@ -1540,6 +1601,7 @@
         const players = buildPlayers(view);
         updateDropList(players);
         trackMotion(players, now);
+        drawGroundCoinHighlights(view, now);
         const pulse = 0.5 + 0.5 * Math.sin(now / 600);
         const policy = labelPolicy(view);
         const onScreen = [];
