@@ -254,13 +254,34 @@
         }
         #${PANEL_ID} .intel-drop-item:last-child { border-bottom: 0; }
         #${PANEL_ID} .intel-drop-name {
+          display: flex;
+          min-width: 0;
+          align-items: baseline;
+          gap: 6px;
           overflow: hidden;
           color: rgba(241, 245, 249, .94);
           font-size: 13px;
           font-weight: 600;
           text-align: left;
+        }
+        #${PANEL_ID} .intel-drop-name-text {
+          min-width: 0;
+          overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
+        }
+        #${PANEL_ID} .intel-drop-balance {
+          flex: 0 0 auto;
+          color: rgba(254, 240, 138, .98);
+          font-size: 12px;
+          font-weight: 800;
+          font-variant-numeric: tabular-nums;
+          text-shadow: 0 0 6px rgba(250, 204, 21, .36);
+        }
+        #${PANEL_ID} .intel-drop-balance-fraction {
+          color: rgba(254, 240, 138, .46);
+          font-size: 10px;
+          font-weight: 700;
         }
         #${PANEL_ID} .intel-drop-teleport {
           min-height: 22px;
@@ -432,6 +453,18 @@
         return `<span><i class="intel-stamina-bar" style="width:${(ratio * 100).toFixed(1)}%"></i><b class="intel-stamina-label">${key} ${Math.floor(value / 1000)}/${Math.floor(limit / 1000)}</b></span>`;
       }
 
+      // external_balance_snapshot 按游戏规则除以 500000；整数部分突出，三位小数弱化。
+      function currentMoney(entity) {
+        const raw = Number(entity && entity.external_balance_snapshot);
+        if (!Number.isFinite(raw) || raw < 0) return null;
+        const converted = (raw / 500000).toFixed(3).split(".");
+        return { whole: Number(converted[0]), fraction: converted[1] || "000" };
+      }
+
+      function formatMoney(value) {
+        return Number(value).toLocaleString("en-US");
+      }
+
       function updateDropList(players, force = false) {
         if (!dropList) return;
         if (!panel.classList.contains("drop-list-open") && !force) return;
@@ -449,7 +482,11 @@
             const low = stamina.some(value => value !== "--" && /^0\//.test(value));
             const mode = player.alive ? "Active" : "Passive";
             const name = player.name || `User ${player.userId}`;
-            return `<div class="intel-drop-item"><span class="intel-drop-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span><span class="intel-drop-value">${player.drop}</span><span class="intel-drop-mode${player.alive ? "" : " passive"}">${mode}</span><button type="button" class="intel-drop-teleport" data-teleport-name="${escapeHtml(name)}" title="传送到 ${escapeHtml(name)}">传送</button><span class="intel-stamina${low ? " warn" : ""}">${staminaCell(entity, "5s")}${staminaCell(entity, "1h")}${staminaCell(entity, "1d")}</span></div>`;
+            const money = currentMoney(entity);
+            const moneyHtml = money == null
+              ? "--"
+              : `${formatMoney(money.whole)}<span class="intel-drop-balance-fraction">.${money.fraction}</span>`;
+            return `<div class="intel-drop-item"><span class="intel-drop-name" title="${escapeHtml(name)}"><span class="intel-drop-name-text">${escapeHtml(name)}</span><span class="intel-drop-balance">${moneyHtml}</span></span><span class="intel-drop-value">${player.drop}</span><span class="intel-drop-mode${player.alive ? "" : " passive"}">${mode}</span><button type="button" class="intel-drop-teleport" data-teleport-name="${escapeHtml(name)}" title="传送到 ${escapeHtml(name)}">传送</button><span class="intel-stamina${low ? " warn" : ""}">${staminaCell(entity, "5s")}${staminaCell(entity, "1h")}${staminaCell(entity, "1d")}</span></div>`;
           }).join("") : '<div class="intel-drop-item"><span class="intel-drop-name">暂无实体数据</span></div>');
         dropList.querySelectorAll("button[data-teleport-name]").forEach(button => {
           button.addEventListener("click", event => {
